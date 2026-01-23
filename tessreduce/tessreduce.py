@@ -2184,6 +2184,8 @@ class tessreduce():
 				#m_tar[self.ref.shape[0]//2,self.ref.shape[1]//2]= 1
 				#m_tar = convolve(m_tar,np.ones((5,5)))
 				#self.mask = self.mask | m_tar
+				mask = convolve(self.mask,np.ones((3,3))) > 1
+				self.mask = mask
 				if moving_mask is not None:
 					moving_mask = moving_mask > 0
 					temp = np.zeros_like(self.flux,dtype=int)
