@@ -66,7 +66,8 @@ class tessreduce():
 				 reduce=True,align=True,diff=True,corr_correction=True,kernel_match=False,calibrate=True,sourcehunt=True,
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
-				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0):
+				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
+				 bkg_temporal_window=501):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -155,6 +156,7 @@ class tessreduce():
 		self.verbose = verbose
 		self._shift_method = shift_method
 		self._use_error_image = use_error_image
+		self._bkg_temporal_window = bkg_temporal_window
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -232,6 +234,7 @@ class tessreduce():
 			else:
 				self.eflux = None
 			self.flux[np.isnan(self.flux)] = 0
+			self.mjd = self.tpf.time.mjd
 			self.wcs = self.tpf.wcs
 			self.ra = self.tpf.ra
 			self.dec = self.tpf.dec
@@ -419,6 +422,7 @@ class tessreduce():
 		else:
 			self.eflux = None
 		self.wcs  = tpf.wcs
+		self.mjd = tpf.time.mjd
 
 	def make_mask(self,catalogue_path=None,maglim=19,scale=1,strapsize=6,useref=False):
 		"""
@@ -702,6 +706,7 @@ class tessreduce():
 		else:
 			bkg = np.array(bkg_smth)
 		self.bkg = bkg
+		self._bkg_temporal_smooth()
 
 	def small_background(self):
 		"""
@@ -816,6 +821,49 @@ class tessreduce():
 				bkg_clip[i] = grad_clip_fill_bkg(self.bkg[i],max_size)
 		self.bkg = np.array(bkg_clip)
 
+	def _bkg_temporal_smooth(self,window_size=None):
+		if window_size is None:
+			window_size = self._bkg_temporal_window # still need to decide what this is 
+			
+		grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
+		time = self.mjd
+		m,med,std = sigma_clipped_stats(abs(grad))
+		ind = abs(grad) < (med + 5*std)
+		ind_where = np.where(ind)[0]
+
+		breaks = np.where(np.diff(time[ind]) > 1)[0]+1
+		breaks = np.insert(breaks, 0, 0)
+		breaks = np.append(breaks, len(time[ind]))
+
+		new_bkg = self.bkg.copy()  # shape (T, X, Y)
+
+		for i in range(len(breaks) - 1):
+			seg_idx = ind_where[breaks[i]:breaks[i+1]]
+			seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
+			sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
+
+			# per-pixel residual threshold
+			resid = np.abs(seg - sav)							   # (n_seg, X, Y)
+			threshold = np.median(resid, axis=0) + 5 * np.std(resid, axis=0)  # (X, Y)
+
+			exceeds = resid > threshold[np.newaxis]					 # (n_seg, X, Y)
+
+			# leading bad run: cumprod stays 1 only while all preceding values were True
+			start_clip = np.cumprod(exceeds,axis=0).sum(axis=0)  # (X, Y)
+			end_clip = len(seg_idx) - np.cumprod(exceeds[::-1], axis=0).sum(axis=0)
+
+			# use sav only within [start_clip, end_clip), raw outside
+			t = np.arange(len(seg_idx))[:, np.newaxis, np.newaxis]	  # (n_seg, 1, 1)
+			use_sav = (t >= start_clip) & (t < end_clip)
+
+			new_bkg[seg_idx] = np.where(use_sav, sav, seg)
+
+		flux = deepcopy(self.flux) - new_bkg
+		med = sigma_clipped_stats(flux,axis=(1,2))[1]
+		new_bkg += med[:,np.newaxis,np.newaxis]
+		self.bkg = new_bkg
+
+
 
 	def get_ref(self,start = None, stop = None):
 		"""
@@ -867,6 +915,9 @@ class tessreduce():
 		
 		self.ref = reference
 		self.ref_ind = ref_ind
+
+	#def stack_ref(self):
+
 
 	def centroids_shifts_starfind(self,plot=None,savename=None):
 		"""
@@ -2094,6 +2145,7 @@ class tessreduce():
 			
 			# calculate the background
 			self.background(rerun_negative=True)
+
 			
 
 			if np.isnan(self.bkg).all():
@@ -2173,12 +2225,12 @@ class tessreduce():
 				self.ref -= self.bkg[self.ref_ind]
 				self._ref_bkg = self.bkg[self.ref_ind]
 				# remake mask
-				self.make_mask(catalogue_path=self._catalogue_path,maglim=17,strapsize=7,scale=mask_scale*.5,useref=False)#Source_mask(ref,grid=0)
+				self.make_mask(catalogue_path=self._catalogue_path,maglim=12,strapsize=7,scale=mask_scale*.5,useref=False)#Source_mask(ref,grid=0)
 				frac = np.nansum((self.mask== 0) * 1.) / (self.mask.shape[0] * self.mask.shape[1])
 				#print('mask frac ',frac)
 				if frac < 0.05:
 					print('!!!WARNING!!! mask is too dense, lowering mask_scale to 0.5, and raising maglim to 15. Background quality will be reduced.')
-					self.make_mask(catalogue_path=self._catalogue_path,maglim=15,strapsize=7,scale=mask_scale*.5*.5)
+					self.make_mask(catalogue_path=self._catalogue_path,maglim=11,strapsize=7,scale=mask_scale*.5*.5)
 				# assuming that the target is in the centre, so masking it out 
 				#m_tar = np.zeros_like(self.mask,dtype=int)
 				#m_tar[self.ref.shape[0]//2,self.ref.shape[1]//2]= 1

@@ -343,6 +343,7 @@ def difference_shifts(image,ref):#,eimage,eref):
 	if np.nansum(abs(image)) > 0:
 		x0= [0,0]
 		bds = [(-1.5,1.5),(-1.5,1.5)]
+		bds = [(-3,3),(-3,3)]
 		#res = minimize(image_sub,x0,args=(image,ref,eimage,eref),method = 'Powell',bounds= bds)
 		res = minimize(image_sub,x0,args=(image,ref),method = 'Powell',bounds= bds)
 		s = res.x
