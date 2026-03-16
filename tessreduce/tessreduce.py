@@ -922,7 +922,12 @@ class tessreduce():
 			self.ref = reference
 			self.ref_ind = ref_ind
 
-	#def stack_ref(self):
+	def stack_ref(self):
+		m,med,std = sigma_clipped_stats(self.flux,axis=(1,2))
+		sm, smed, sstd = sigma_clipped_stats(std)
+		ind = np.where((std < (smed + 3*sstd)) & (std > (smed - 3*sstd)))[0]
+		stack = np.nanmedian(self.flux[ind],axis=0)
+		self.ref = stack
 
 
 	def centroids_shifts_starfind(self,plot=None,savename=None):
@@ -2225,7 +2230,8 @@ class tessreduce():
 					self.flux += test_seed
 				self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
 				# subtract reference
-				self.ref = deepcopy(self.flux[self.ref_ind])
+				#self.ref = deepcopy(self.flux[self.ref_ind])
+				self.stack_ref()
 				self.flux -= self.ref
 
 				self.ref -= self.bkg[self.ref_ind]
