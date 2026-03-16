@@ -67,7 +67,7 @@ class tessreduce():
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501):
+				 bkg_temporal_window=501,ref_ind=None):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -157,6 +157,7 @@ class tessreduce():
 		self._shift_method = shift_method
 		self._use_error_image = use_error_image
 		self._bkg_temporal_window = bkg_temporal_window
+		self._force_ref_ind = ref_ind
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -887,34 +888,39 @@ class tessreduce():
 		"""
 
 		data = strip_units(self.flux)
-		if (start is None) & (stop is None):
-			start = 0
-			stop = len(self.flux)
-		elif (start is not None) & (stop is None):
-			stop = len(self.flux)
 
-		elif (start is None) & (stop is not None):
-			start = 0
+		if self._force_ref_ind is not None:
+			self.ref_ind = self._force_ref_ind
+			self.ref = data[self._force_ref_ind]
+		else:
+			if (start is None) & (stop is None):
+				start = 0
+				stop = len(self.flux)
+			elif (start is not None) & (stop is None):
+				stop = len(self.flux)
 
-		start = int(start)
-		stop = int(stop)
+			elif (start is None) & (stop is not None):
+				start = 0
 
-		ind = self.tpf.quality[start:stop] == 0
-		d = deepcopy(data[start:stop])[ind]
-		summed = np.nanmedian(d,axis=(1,2))
-		summed[summed <=0] = 1e5
-		lim = np.argmin(summed)
-		lim = np.percentile(summed[np.isfinite(summed)],5)
-		summed[summed>lim] = 0
-		inds = np.where(ind)[0]
-		ref_ind = start + inds[np.argmax(summed)]
-		reference = data[ref_ind]
-		if len(reference.shape) > 2:
-			reference = reference[0]
-			ref_ind = ref_ind[0]
-		
-		self.ref = reference
-		self.ref_ind = ref_ind
+			start = int(start)
+			stop = int(stop)
+
+			ind = self.tpf.quality[start:stop] == 0
+			d = deepcopy(data[start:stop])[ind]
+			summed = np.nanmedian(d,axis=(1,2))
+			summed[summed <=0] = 1e5
+			lim = np.argmin(summed)
+			lim = np.percentile(summed[np.isfinite(summed)],5)
+			summed[summed>lim] = 0
+			inds = np.where(ind)[0]
+			ref_ind = start + inds[np.argmax(summed)]
+			reference = data[ref_ind]
+			if len(reference.shape) > 2:
+				reference = reference[0]
+				ref_ind = ref_ind[0]
+			
+			self.ref = reference
+			self.ref_ind = ref_ind
 
 	#def stack_ref(self):
 
