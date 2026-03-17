@@ -67,7 +67,7 @@ class tessreduce():
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501,ref_ind=None):
+				 bkg_temporal_window=501,ref_ind=None,ref_type='stack'):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -158,6 +158,7 @@ class tessreduce():
 		self._use_error_image = use_error_image
 		self._bkg_temporal_window = bkg_temporal_window
 		self._force_ref_ind = ref_ind
+		self._ref_type = ref_type
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -827,18 +828,19 @@ class tessreduce():
 			window_size = self._bkg_temporal_window # still need to decide what this is 
 			
 		grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
-		time = self.mjd
+		time = deepcopy(self.mjd)
 		m,med,std = sigma_clipped_stats(abs(grad))
 		ind = abs(grad) < (med + 5*std)
 		ind_where = np.where(ind)[0]
 
-		breaks = np.where(np.diff(time[ind]) > 1)[0]+1
+		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
 		breaks = np.insert(breaks, 0, 0)
 		breaks = np.append(breaks, len(time[ind]))
-
-		new_bkg = self.bkg.copy()  # shape (T, X, Y)
+		print('breaks: ',breaks)
+		new_bkg = deepcopy(self.bkg)  # shape (T, X, Y)
 
 		for i in range(len(breaks) - 1):
+			print(breaks[i+1] - breaks[i])
 			seg_idx = ind_where[breaks[i]:breaks[i+1]]
 			seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
 			sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
@@ -2230,8 +2232,10 @@ class tessreduce():
 					self.flux += test_seed
 				self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
 				# subtract reference
-				#self.ref = deepcopy(self.flux[self.ref_ind])
-				self.stack_ref()
+				if self._ref_type.lower() == 'single':
+					self.ref = deepcopy(self.flux[self.ref_ind])
+				elif self._ref_type.lower() == 'stack':
+					self.stack_ref()
 				self.flux -= self.ref
 
 				self.ref -= self.bkg[self.ref_ind]
