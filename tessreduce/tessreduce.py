@@ -831,9 +831,23 @@ class tessreduce():
 		time = deepcopy(self.mjd)
 		m,med,std = sigma_clipped_stats(abs(grad))
 		ind = abs(grad) < (med + 5*std)
-		left  = np.concatenate([[False], ind[:-1]])
-		right = np.concatenate([ind[1:],  [False]])
-		ind   = ind & (left | right)
+		# left  = np.concatenate([[False], ind[:-1]])
+		# right = np.concatenate([ind[1:],  [False]])
+		# ind   = ind & (left | right)
+		from scipy.ndimage import label
+		clusters, _ = label(ind)
+		sizes = np.bincount(clusters.ravel())   # sizes[i] = number of points in cluster i
+		small = sizes < window_size
+		ind[small[clusters]] = False 
+		if np.sum(ind) == 0:
+			window_size = int(0.5 * np.max(sizes))
+			if window_size % 2 == 0:
+				window_size += 1
+			print(f'!!!WARNING window size for temporal background smoothing decreaesd to {window_size}')
+			ind = abs(grad) < (med + 5*std)
+			small = sizes < window_size
+			ind[small[clusters]] = False 
+
 		ind_where = np.where(ind)[0]
 
 		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
