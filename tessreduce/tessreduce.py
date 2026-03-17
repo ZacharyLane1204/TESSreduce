@@ -830,7 +830,13 @@ class tessreduce():
 		grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
 		time = deepcopy(self.mjd)
 		m,med,std = sigma_clipped_stats(abs(grad))
+		plt.figure()
+		plt.plot(time,abs(grad))
+		plt.axhline(med + 5*std)
 		ind = abs(grad) < (med + 5*std)
+		left  = np.concatenate([[False], ind[:-1]])
+		right = np.concatenate([ind[1:],  [False]])
+		ind   = ind & (left | right)
 		ind_where = np.where(ind)[0]
 
 		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
