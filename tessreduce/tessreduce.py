@@ -830,9 +830,6 @@ class tessreduce():
 		grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
 		time = deepcopy(self.mjd)
 		m,med,std = sigma_clipped_stats(abs(grad))
-		plt.figure()
-		plt.plot(time,abs(grad))
-		plt.axhline(med + 5*std)
 		ind = abs(grad) < (med + 5*std)
 		left  = np.concatenate([[False], ind[:-1]])
 		right = np.concatenate([ind[1:],  [False]])
@@ -842,11 +839,9 @@ class tessreduce():
 		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
 		breaks = np.insert(breaks, 0, 0)
 		breaks = np.append(breaks, len(time[ind]))
-		print('breaks: ',breaks)
 		new_bkg = deepcopy(self.bkg)  # shape (T, X, Y)
 
 		for i in range(len(breaks) - 1):
-			print(breaks[i+1] - breaks[i])
 			seg_idx = ind_where[breaks[i]:breaks[i+1]]
 			seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
 			sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
