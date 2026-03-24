@@ -836,28 +836,29 @@ class tessreduce():
 		new_bkg = deepcopy(self.bkg)  # shape (T, X, Y)
 
 		for i in range(len(breaks) - 1):
-			window_size = int(abs(breaks[i]-breaks[i+1])/4)
-			if window_size/2 == window_size//2:
-				window_size += 1
-			seg_idx = ind_where[breaks[i]:breaks[i+1]]
-			seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
-			sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
+			if abs(breaks[i]-breaks[i+1]) > 100:
+				window_size = int(abs(breaks[i]-breaks[i+1])/4)
+				if window_size/2 == window_size//2:
+					window_size += 1
+				seg_idx = ind_where[breaks[i]:breaks[i+1]]
+				seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
+				sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
 
-			# per-pixel residual threshold
-			resid = np.abs(seg - sav)							   # (n_seg, X, Y)
-			threshold = np.median(resid, axis=0) + 5 * np.std(resid, axis=0)  # (X, Y)
+				# per-pixel residual threshold
+				resid = np.abs(seg - sav)							   # (n_seg, X, Y)
+				threshold = np.median(resid, axis=0) + 5 * np.std(resid, axis=0)  # (X, Y)
 
-			exceeds = resid > threshold[np.newaxis]					 # (n_seg, X, Y)
+				exceeds = resid > threshold[np.newaxis]					 # (n_seg, X, Y)
 
-			# leading bad run: cumprod stays 1 only while all preceding values were True
-			start_clip = np.cumprod(exceeds,axis=0).sum(axis=0)  # (X, Y)
-			end_clip = len(seg_idx) - np.cumprod(exceeds[::-1], axis=0).sum(axis=0)
+				# leading bad run: cumprod stays 1 only while all preceding values were True
+				start_clip = np.cumprod(exceeds,axis=0).sum(axis=0)  # (X, Y)
+				end_clip = len(seg_idx) - np.cumprod(exceeds[::-1], axis=0).sum(axis=0)
 
-			# use sav only within [start_clip, end_clip), raw outside
-			t = np.arange(len(seg_idx))[:, np.newaxis, np.newaxis]	  # (n_seg, 1, 1)
-			use_sav = (t >= start_clip) & (t < end_clip)
+				# use sav only within [start_clip, end_clip), raw outside
+				t = np.arange(len(seg_idx))[:, np.newaxis, np.newaxis]	  # (n_seg, 1, 1)
+				use_sav = (t >= start_clip) & (t < end_clip)
 
-			new_bkg[seg_idx] = np.where(use_sav, sav, seg)
+				new_bkg[seg_idx] = np.where(use_sav, sav, seg)
 
 		flux = deepcopy(self.flux) - new_bkg
 		med = sigma_clipped_stats(flux,axis=(1,2))[1]
@@ -1047,7 +1048,7 @@ class tessreduce():
 		f = deepcopy(self.flux)
 		m = self.ref.copy() * sources
 		m[m==0] = np.nan
-		f[f > 1e4] = np.nan
+		# f[f > 1e4] = np.nan
 		#eref = self.eflux[self.ref_ind]
 
 
