@@ -591,14 +591,15 @@ class tessreduce():
 		new_qes = deepcopy(qes)
 		ind_where = np.where(ind)[0]
 		for i in range(len(breaks)-1):
-			window_size = int(abs(breaks[i]-breaks[i+1])/4)
-			if window_size/2 == window_size//2:
-				window_size += 1
-			#if window_size > abs(breaks[i]-breaks[i+1])/4:
+			if abs(breaks[i]-breaks[i+1]) > 100:
+				window_size = int(abs(breaks[i]-breaks[i+1])/4)
+				if window_size/2 == window_size//2:
+					window_size += 1
+				#if window_size > abs(breaks[i]-breaks[i+1])/4:
 
-			seg_idx = ind_where[breaks[i]:breaks[i+1]]
-			sav = savgol_filter(qes[ind][breaks[i]:breaks[i+1]], window_size, 1, axis=0)
-			new_qes[seg_idx] = sav
+				seg_idx = ind_where[breaks[i]:breaks[i+1]]
+				sav = savgol_filter(qes[ind][breaks[i]:breaks[i+1]], window_size, 1, axis=0)
+				new_qes[seg_idx] = sav
 		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment 
 		self.qe = new_qes
 
