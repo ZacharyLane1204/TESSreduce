@@ -221,7 +221,7 @@ def Smooth_bkg(data, gauss_smooth=2, interpolate=False, extrapolate=True):
 				# end inpaint
 				estimate = inpaint.inpaint_biharmonic(data,mask)
 				#estimate = signal.fftconvolve(estimate,self.prf,mode='same')
-				if (np.nanmedian(estimate) < 100) & (np.nanstd(estimate) < 3): # magic numbers to define a well behaved background
+				if (np.nanmedian(estimate) < 150) & (np.nanstd(estimate) < 3): # magic numbers to define a well behaved background
 					gauss_smooth = gauss_smooth * 3
 				estimate = gaussian_filter(estimate,gauss_smooth)
 		else:
@@ -1360,6 +1360,5 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 		else:
 			return np.array([np.nan]), np.array([np.nan])
 	
-
 
 

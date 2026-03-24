@@ -67,7 +67,7 @@ class tessreduce():
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501,ref_ind=None,ref_type='stack'):
+				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -159,6 +159,7 @@ class tessreduce():
 		self._bkg_temporal_window = bkg_temporal_window
 		self._force_ref_ind = ref_ind
 		self._ref_type = ref_type
+		self._ref_time_window = ref_time_window
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -474,12 +475,14 @@ class tessreduce():
 		tmp[tmp==0] = 1e12 # random big number 
 		ref = data[np.argmin(tmp)] * sky
 
-		# Correct for the electrical straps
+		# Compute a spatial QE map from a single reference frame.
+		# Stored as self.qe_spatial for diagnostic use; the temporal QE
+		# correction applied during background() is computed separately by _calc_qe.
 		try:
-			qe = correct_straps(ref,mask,parallel=True)
+			self.qe_spatial = correct_straps(ref,mask,parallel=True)
 		except:
-			qe = correct_straps(ref,mask,parallel=False)
-		
+			self.qe_spatial = correct_straps(ref,mask,parallel=False)
+
 
 		c1 = data.shape[1] // 2
 		c2 = data.shape[2] // 2
@@ -566,62 +569,40 @@ class tessreduce():
 				m[i] = par_psf_source_mask(data[i],self.prf,sigma)
 		return m * 1.0
 
-	def _calc_qe(self,flux,bkg_smth):#,flux_e):
+	def _calc_qe(self):#,flux_e):
 		'''
 		Calculate the effective quantum efficiency enhancement of the detector from scattered light.
 		'''
-		norm = flux / bkg_smth
-		straps = norm * ((self.mask & 4)>0)
+		time = deepcopy(self.mjd)
+		strap_data = (self.flux) * ((self.mask&4) > 0)*(~self.mask&1)
+		qe = strap_data/self.bkg
+		qe[qe == 0] = np.nan
+		m,med,std = sigma_clipped_stats(qe,axis=1,sigma_upper=2)
+		qes = np.ones_like(qe)
+		qes[:,:,:] = med[:,np.newaxis,:]
+		qes[np.isnan(qes)] = 1
+		
+		av_bkg = np.sum(self.bkg,axis=(1,2))/(self.bkg.shape[1]*self.bkg.shape[2])
+		ind = av_bkg < np.nanmean(av_bkg)
+		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
+		breaks = np.insert(breaks, 0, 0)
+		breaks = np.append(breaks, len(time[ind]))
+		
+		new_qes = deepcopy(qes)
+		ind_where = np.where(ind)[0]
+		for i in range(len(breaks)-1):
+			window_size = int(abs(breaks[i]-breaks[i+1])/4)
+			if window_size/2 == window_size//2:
+				window_size += 1
+			#if window_size > abs(breaks[i]-breaks[i+1])/4:
 
-		straps[straps==0] = np.nan
-		m,med,std = sigma_clipped_stats(straps,axis=(1,2),maxiters=10,mask_value=np.nan)
-		masks = straps < (med + 2*std)[:,np.newaxis,np.newaxis]
-		m = (np.nansum(masks,axis=0) > 0) * 1.
-		m[m==0] = np.nan
-		ratio = flux / bkg_smth * m
-		ratio[ratio < 1] = np.nan
-		#m, med, std = sigma_clipped_stats(ratio,axis=1,sigma_upper=2)
-		qe_1d = np.nanpercentile(ratio,10,axis=1)
-		qe = np.ones_like(norm)
-		qe[:,:,:] = qe_1d[:,np.newaxis,:]
-		#qe[:,:,:] = med[:,np.newaxis,:]
-		qe[np.isnan(qe)] = 1
-		qe[qe<1] = 1
-		m, med, std = sigma_clipped_stats(qe,axis=0)
-		qe[:] = med
-		return qe
+			seg_idx = ind_where[breaks[i]:breaks[i+1]]
+			sav = savgol_filter(qes[ind][breaks[i]:breaks[i+1]], window_size, 1, axis=0)
+			new_qes[seg_idx] = sav
+		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment 
+		self.qe = new_qes
 
-		# straps[straps==0] = np.nan
-		# m,med,std = sigma_clipped_stats(straps,axis=(1,2),maxiters=10,mask_value=np.nan)
-		# masks = straps < (med + 2*std)[:,np.newaxis,np.newaxis]
-		# m = (np.nansum(masks,axis=0) > 0) * 1.
-		# m[m==0] = np.nan
-		# qe = np.ones_like(flux) * 1.
-		# if flux.shape[1] < 10000:
-		# 	ratio = (flux / bkg_smth) * m
-			
-		# 	m, med, std = sigma_clipped_stats(ratio,axis=1,sigma_upper=2,sigma_lower=3)
-		# 	#qe_1d = np.nanpercentile(ratio,10,axis=1)
-			
-		# 	#qe[:,:,:] = qe_1d[:,np.newaxis,:]
-		# 	qe[:,:,:] = med[:,np.newaxis,:]
-
-		# else:
-		# 	index = np.arange(len(flux),dtype=int)
-		# 	if self.parallel:
-		# 		qe = Parallel(n_jobs=self.num_cores)(delayed(parallel_strap_fit)(flux[i],bkg_smth[i],flux_e[i],m) for i in index)
-		# 	else:
-		# 		qe = []
-		# 		for i in index:
-		# 			qe += [parallel_strap_fit(flux[i],bkg_smth[i],flux_e[i],m)]
-		# 	qe = np.array(qe)
-		# #filler = np.nanmedian(qe,axis=1)
-
-		# qe[np.isnan(qe)] = 1
-		# qe[qe<1] = 1
-		# return qe
-
-	def background(self,gauss_smooth=2,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
+	def background(self,gauss_smooth=3,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
 		"""
 		Calculate the temporal and spatial variation in the background.
 
@@ -663,7 +644,7 @@ class tessreduce():
 
 		# Calculate the smooth background 
 		if (self.flux.shape[1] > 30) & (self.flux.shape[2] > 30):
-			flux = strip_units(self.flux)
+			flux = strip_units(self.flux) 
 
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
@@ -700,14 +681,11 @@ class tessreduce():
 			bkg_smth = self.bkg
 		
 		# Calculate quantum efficiency 
+		self.bkg = np.array(bkg_smth)
 		if calc_qe:
-			self.bkg = bkg_smth
-			qe = self._calc_qe(flux,bkg_smth)#,self.eflux)
-			self.qe = qe
-			bkg = bkg_smth * qe
-		else:
-			bkg = np.array(bkg_smth)
-		self.bkg = bkg
+			self._calc_qe()#,self.eflux)
+			self.bkg *= self.qe
+
 		self._bkg_temporal_smooth()
 
 	def small_background(self):
@@ -827,26 +805,28 @@ class tessreduce():
 		if window_size is None:
 			window_size = self._bkg_temporal_window # still need to decide what this is 
 			
-		grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
+		#grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
+		av_bkg = np.nanmean(self.bkg,axis=(1,2))
 		time = deepcopy(self.mjd)
-		m,med,std = sigma_clipped_stats(abs(grad))
-		ind = abs(grad) < (med + 5*std)
+		ind = av_bkg < np.nanmean(av_bkg)
+		# m,med,std = sigma_clipped_stats(abs(grad))
+		# ind = abs(grad) < (med + 5*std)
 		# left  = np.concatenate([[False], ind[:-1]])
 		# right = np.concatenate([ind[1:],  [False]])
 		# ind   = ind & (left | right)
-		from scipy.ndimage import label
-		clusters, _ = label(ind)
-		sizes = np.bincount(clusters.ravel())   # sizes[i] = number of points in cluster i
-		small = sizes < window_size
-		ind[small[clusters]] = False 
-		if np.sum(ind) == 0:
-			window_size = int(0.5 * np.max(sizes))
-			if window_size % 2 == 0:
-				window_size += 1
-			print(f'!!!WARNING window size for temporal background smoothing decreaesd to {window_size}')
-			ind = abs(grad) < (med + 5*std)
-			small = sizes < window_size
-			ind[small[clusters]] = False 
+		# from scipy.ndimage import label
+		# clusters, _ = label(ind)
+		# sizes = np.bincount(clusters.ravel())   # sizes[i] = number of points in cluster i
+		# small = sizes < window_size
+		# ind[small[clusters]] = False 
+		# if np.sum(ind) == 0:
+		# 	window_size = int(0.5 * np.max(sizes))
+		# 	if window_size % 2 == 0:
+		# 		window_size += 1
+		# 	print(f'!!!WARNING window size for temporal background smoothing decreaesd to {window_size}')
+		# 	ind = abs(grad) < (med + 5*std)
+		# 	small = sizes < window_size
+		# 	ind[small[clusters]] = False 
 
 		ind_where = np.where(ind)[0]
 
@@ -856,6 +836,9 @@ class tessreduce():
 		new_bkg = deepcopy(self.bkg)  # shape (T, X, Y)
 
 		for i in range(len(breaks) - 1):
+			window_size = int(abs(breaks[i]-breaks[i+1])/4)
+			if window_size/2 == window_size//2:
+				window_size += 1
 			seg_idx = ind_where[breaks[i]:breaks[i+1]]
 			seg = new_bkg[seg_idx]									  # (n_seg, X, Y)
 			sav = savgol_filter(seg, window_size, 1, axis=0)					 # (n_seg, X, Y)
@@ -880,7 +863,6 @@ class tessreduce():
 		med = sigma_clipped_stats(flux,axis=(1,2))[1]
 		new_bkg += med[:,np.newaxis,np.newaxis]
 		self.bkg = new_bkg
-
 
 
 	def get_ref(self,start = None, stop = None):
@@ -908,7 +890,7 @@ class tessreduce():
 
 		if self._force_ref_ind is not None:
 			self.ref_ind = self._force_ref_ind
-			self.ref = data[self._force_ref_ind]
+			self.ref = deepcopy(data[self._force_ref_ind])
 		else:
 			if (start is None) & (stop is None):
 				start = 0
@@ -931,18 +913,27 @@ class tessreduce():
 			summed[summed>lim] = 0
 			inds = np.where(ind)[0]
 			ref_ind = start + inds[np.argmax(summed)]
-			reference = data[ref_ind]
+			reference = deepcopy(data[ref_ind])
 			if len(reference.shape) > 2:
 				reference = reference[0]
 				ref_ind = ref_ind[0]
-			
+			reference[reference <= 0] = np.nan
+			base = np.nanmin(reference)
+			reference -= base
 			self.ref = reference
 			self.ref_ind = ref_ind
+			# self.flux -= base
 
-	def stack_ref(self):
+	def stack_ref(self,time_restriction=None):
+		if time_restriction is None:
+			time_restriction = self._ref_time_window
 		m,med,std = sigma_clipped_stats(self.flux,axis=(1,2))
 		sm, smed, sstd = sigma_clipped_stats(std)
 		ind = np.where((std < (smed + 3*sstd)) & (std > (smed - 3*sstd)))[0]
+		times = self.mjd[ind]
+		ref_time = self.mjd[self.ref_ind]
+		good = abs(times - ref_time) <= time_restriction
+		ind = ind[good]
 		stack = np.nanmedian(self.flux[ind],axis=0)
 		self.ref = stack
 
@@ -1049,13 +1040,14 @@ class tessreduce():
 		if savename is None:
 			savename = self.savename
 		
-		sources = ((self.mask & 1) ==1) * 1.0 - (self.mask & 2)
+		sources = ((self.mask & 1) ==1) * 1.0 - (convolve((self.mask & 2),np.ones((3,3))) > 0) * 1.0
 		sources[sources<=0] = 0
 		sources[self.mask.shape[0]-3:self.mask.shape[0]+4,self.mask.shape[1]-3:self.mask.shape[1]+4] = 0
 
-		f = self.flux 
+		f = deepcopy(self.flux)
 		m = self.ref.copy() * sources
 		m[m==0] = np.nan
+		f[f > 1e4] = np.nan
 		#eref = self.eflux[self.ref_ind]
 
 
@@ -2172,19 +2164,20 @@ class tessreduce():
 				print('calculating background')
 			
 			# calculate the background
+			self.flux -= self.ref
 			self.background(rerun_negative=True)
-
-			
+			self.flux += self.ref
+			self.flux -= self.bkg
 
 			if np.isnan(self.bkg).all():
 				# check to see if the background worked
 				raise ValueError('bkg all nans')
 			
-			flux = strip_units(self.flux)
+			# flux = strip_units(self.flux)
 			# subtract background from unitless flux
-			self.flux = flux - self.bkg
+			# self.flux = flux - self.bkg
 			# get a ref with low background
-			self.ref = deepcopy(self.flux[self.ref_ind])
+			# self.ref = deepcopy(self.flux[self.ref_ind])
 			if self.verbose > 0:
 				print('background subtracted')
 			
@@ -2251,12 +2244,13 @@ class tessreduce():
 					self.ref = deepcopy(self.flux[self.ref_ind])
 				elif self._ref_type.lower() == 'stack':
 					self.stack_ref()
+				self.ref -= np.nanmin(self.ref)
 				self.flux -= self.ref
 
-				self.ref -= self.bkg[self.ref_ind]
+				# self.ref -= self.bkg[self.ref_ind]
 				self._ref_bkg = self.bkg[self.ref_ind]
 				# remake mask
-				self.make_mask(catalogue_path=self._catalogue_path,maglim=12,strapsize=7,scale=mask_scale*.5,useref=False)#Source_mask(ref,grid=0)
+				self.make_mask(catalogue_path=self._catalogue_path,maglim=13,strapsize=7,scale=mask_scale*.5,useref=False)#Source_mask(ref,grid=0)
 				frac = np.nansum((self.mask== 0) * 1.) / (self.mask.shape[0] * self.mask.shape[1])
 				#print('mask frac ',frac)
 				if frac < 0.05:
@@ -2267,8 +2261,9 @@ class tessreduce():
 				#m_tar[self.ref.shape[0]//2,self.ref.shape[1]//2]= 1
 				#m_tar = convolve(m_tar,np.ones((5,5)))
 				#self.mask = self.mask | m_tar
-				mask = convolve(self.mask,np.ones((3,3))) > 1
-				self.mask = mask
+				#mask 
+				#mask = convolve(self.mask,np.ones((3,3))) > 1
+				#elf.mask = mask
 				if moving_mask is not None:
 					moving_mask = moving_mask > 0
 					temp = np.zeros_like(self.flux,dtype=int)
