@@ -584,7 +584,8 @@ class tessreduce():
 		qes[np.isnan(qes)] = 1
 		
 		av_bkg = np.sum(self.bkg,axis=(1,2))/(self.bkg.shape[1]*self.bkg.shape[2])
-		ind = av_bkg < np.nanmean(av_bkg)
+		m,med,std = sigma_clipped_stats(av_bkg)
+		ind = av_bkg < med + 5*std
 		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
 		breaks = np.insert(breaks, 0, 0)
 		breaks = np.append(breaks, len(time[ind]))
@@ -810,7 +811,8 @@ class tessreduce():
 		#grad = np.gradient(np.sum(self.bkg,axis=(1,2)),self.mjd) # not sure about this gradient 
 		av_bkg = np.nanmean(self.bkg,axis=(1,2))
 		time = deepcopy(self.mjd)
-		ind = av_bkg < np.nanmean(av_bkg)
+		m,med,std = sigma_clipped_stats(av_bkg)
+		ind = av_bkg < med + 5*std
 		# m,med,std = sigma_clipped_stats(abs(grad))
 		# ind = abs(grad) < (med + 5*std)
 		# left  = np.concatenate([[False], ind[:-1]])
