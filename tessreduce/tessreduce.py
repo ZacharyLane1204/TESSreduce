@@ -605,7 +605,7 @@ class tessreduce():
 		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment 
 		self.qe = new_qes
 
-	def background(self,gauss_smooth=3,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
+	def background(self,gauss_smooth=2,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
 		"""
 		Calculate the temporal and spatial variation in the background.
 
@@ -1045,7 +1045,8 @@ class tessreduce():
 		if savename is None:
 			savename = self.savename
 		
-		sources = ((self.mask & 1) ==1) * 1.0 - (convolve((self.mask & 2),np.ones((3,3))) > 0) * 1.0
+		# sources = ((self.mask & 1) ==1) * 1.0 - (convolve((self.mask & 2),np.ones((3,3))) > 0) * 1.0
+		sources = ((self.mask & 1) ==1) * 1.0 - (self.mask & 2) * 1.0
 		sources[sources<=0] = 0
 		sources[self.mask.shape[0]-3:self.mask.shape[0]+4,self.mask.shape[1]-3:self.mask.shape[1]+4] = 0
 
@@ -2169,9 +2170,9 @@ class tessreduce():
 				print('calculating background')
 			
 			# calculate the background
-			self.flux -= self.ref
+			#self.flux -= self.ref
 			self.background(rerun_negative=True)
-			self.flux += self.ref
+			#self.flux += self.ref
 			self.flux -= self.bkg
 
 			if np.isnan(self.bkg).all():
