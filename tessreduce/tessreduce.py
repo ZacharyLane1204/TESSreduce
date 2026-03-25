@@ -67,7 +67,7 @@ class tessreduce():
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,quality_bitmask='default'):
+				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -251,7 +251,7 @@ class tessreduce():
 		elif self.check_coord():
 			if self.verbose>0:
 				print('Downloading TPF from TESScut')
-			self.get_TESS(quality_bitmask=quality_bitmask,cache_dir=cache_dir,cache=cache)
+			self.get_TESS(quality_bitmask=self._quality_bitmask,cache_dir=cache_dir,cache=cache)
 			self._get_gaia()
 
 		self.ground = ground(ra = self.ra, dec = self.dec)
