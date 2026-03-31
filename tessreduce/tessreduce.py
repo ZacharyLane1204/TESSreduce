@@ -244,7 +244,8 @@ class tessreduce():
 			self.ra = self.tpf.ra
 			self.dec = self.tpf.dec
 			self.size = self.tpf.flux.shape[1]
-			self.sector = self.tpf.sector
+			if self.tpf.sector is not None:
+				self.sector = self.tpf.sector
 			if self.sector is None:
 				self.sector = 999
 
@@ -692,7 +693,7 @@ class tessreduce():
 
 		from .adaptive_background import AdaptiveBackground
 		print('adaptive bkg')
-		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.tpf.sector, camera=self.tpf.camera,
+		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores) 
 		smoothed = smoother.smooth().smoothed
 		self.bkg = smoothed
