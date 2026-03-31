@@ -66,8 +66,8 @@ class tessreduce():
 				 reduce=True,align=True,diff=True,corr_correction=True,kernel_match=False,calibrate=True,sourcehunt=True,
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
-				 shift_method='difference',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2):
+				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
+				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -171,6 +171,7 @@ class tessreduce():
 		self.num_cores = num_cores
 		self.imaging = imaging
 		self._prf_path = prf_path
+		self._vector_path = vector_path
 
 		# Plotting
 		self.plot = plot
@@ -689,7 +690,14 @@ class tessreduce():
 			self._calc_qe()#,self.eflux)
 			self.bkg *= self.qe
 
-		self._bkg_temporal_smooth()
+		from .adaptive_background import AdaptiveBackground
+		print('adaptive bkg')
+		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.tpf.sector, camera=self.tpf.camera,
+									  data_path=self._vector_path,n_jobs=self.num_cores) 
+		smoothed = smoother.smooth().smoothed
+		self.bkg = smoothed
+		#self._bkg_temporal_smooth()
+		#self._bkg_adaptive_smooth()
 
 	def small_background(self):
 		"""
@@ -870,6 +878,160 @@ class tessreduce():
 		self.bkg = new_bkg
 
 
+	def _bkg_adaptive_smooth(self, gap_thresh=0.5, clip_sigma=5.0,
+							 plot=None, savename=None):
+		"""
+		Adaptive temporal Gaussian smoothing of the background cube.
+
+		Two Gaussian filters are computed per segment — one wide (sigma=n/4,
+		for stable epochs) and one narrow (sigma=n/32, for rapidly varying
+		epochs) — and linearly blended per-frame based on the local background
+		gradient estimated from a short first-pass SavGol smooth.
+
+		  alpha = 1  →  wide filter   (stable background, low gradient)
+		  alpha = 0  →  narrow filter (variable background, high gradient)
+
+		On simple/stable data (e.g. GRB fields) the gradient is near-zero
+		everywhere so alpha ≈ 1 and the result matches SavGol n//4.
+		On complex scattered-light data the gradient is elevated during ramps
+		so alpha → 0 and the narrower filter tracks the variation.
+
+		Parameters
+		----------
+		gap_thresh : float
+			Time gap in days that marks a segment boundary. Default 0.5.
+		clip_sigma : float
+			Sigma threshold for outlier frame rejection. Default 5.0.
+		"""
+		if plot is None:
+			plot = self.diagnostic_plot
+		if savename is None:
+			savename = self.savename
+
+		av_bkg     = np.nanmean(self.bkg, axis=(1, 2))
+		av_bkg_raw = av_bkg.copy()
+		time       = deepcopy(self.mjd)
+
+		_, med, std = sigma_clipped_stats(av_bkg)
+		ind       = av_bkg < med + clip_sigma * std
+		ind_where = np.where(ind)[0]
+
+		breaks = np.where(np.diff(time[ind]) > gap_thresh)[0] + 1
+		breaks = np.insert(breaks, 0, 0)
+		breaks = np.append(breaks, len(time[ind]))
+
+		new_bkg   = deepcopy(self.bkg)
+		alpha_all = np.full(len(time), np.nan)
+		grad_all  = np.full(len(time), np.nan)
+
+		for i in range(len(breaks) - 1):
+			seg_idx = ind_where[breaks[i]:breaks[i + 1]]
+			n = len(seg_idx)
+			if n < 10:
+				continue
+
+			seg = new_bkg[seg_idx]    # (n, X, Y)
+			av  = av_bkg[seg_idx]     # (n,)
+
+			# SavGol window sizes — wide for stable regions, narrow for variable.
+			# SavGol is strictly local (±window/2 frames) so it does not
+			# average in distant frames the way a Gaussian filter does.
+			w_wide = max(n // 4, 5)
+			if w_wide % 2 == 0:
+				w_wide += 1
+			w_narrow = max(n // 16, 5)
+			if w_narrow % 2 == 0:
+				w_narrow += 1
+
+			# ── Pass 1: gradient from short SavGol of spatial mean ───────
+			rw = max(min(n // 32, 51), 5)
+			if rw % 2 == 0:
+				rw += 1
+			av_rough    = savgol_filter(av, rw, 1)
+			grad        = np.abs(np.gradient(av_rough))
+			gw          = max(min(n // 32, 25), 3)
+			grad_smooth = np.convolve(grad, np.ones(gw) / gw, mode='same')
+			med_grad    = float(np.median(grad_smooth))
+
+			# ── Blend weight: alpha=1 (wide) where gradient is low ───────
+			if med_grad < 1e-10:
+				alpha = np.ones(n)
+			else:
+				rate_norm = grad_smooth / med_grad
+				alpha = np.clip(1.0 / np.maximum(rate_norm, 1.0), 0.0, 1.0)
+
+			alpha_all[seg_idx] = alpha
+			grad_all[seg_idx]  = grad_smooth
+
+			# ── Pass 2: blend wide and narrow SavGol filters ─────────────
+			sav_wide   = savgol_filter(seg, w_wide,   1, axis=0)
+			sav_narrow = savgol_filter(seg, w_narrow, 1, axis=0)
+			a = alpha[:, np.newaxis, np.newaxis]
+			new_bkg[seg_idx] = a * sav_wide + (1.0 - a) * sav_narrow
+
+		# ── Median flux correction (background pixels only) ──────────────
+		# Use only source-free pixels so that star/galaxy flux does not
+		# bias the correction upward.
+		bkg_pixel_mask = ~(self.mask & 1).astype(bool)   # True = background
+		flux      = deepcopy(self.flux) - new_bkg         # (T, X, Y)
+		flux_bkg  = flux.copy().astype(float)
+		flux_bkg[:, ~bkg_pixel_mask] = np.nan
+		med = np.nanmedian(flux_bkg, axis=(1, 2))
+		new_bkg += med[:, np.newaxis, np.newaxis]
+		self.bkg = new_bkg
+
+		if plot:
+			av_smooth = np.nanmean(self.bkg, axis=(1, 2))
+			t = self.mjd.copy()
+
+			gap_idx = np.where(np.diff(t) > gap_thresh)[0]
+			def _nan_gaps(arr):
+				a = arr.copy().astype(float)
+				if len(gap_idx):
+					a[gap_idx] = np.nan
+				return a
+
+			fig, axes = plt.subplots(3, 1,
+									 figsize=(1.5 * fig_width, 3.0 * fig_width),
+									 sharex=True)
+
+			# Panel 1: background + wide / narrow / adaptive smooths
+			ax = axes[0]
+			ax.plot(t, av_bkg_raw, '.k', ms=1.5, alpha=0.3, label='Raw')
+			ax.plot(t, _nan_gaps(av_smooth), lw=1.5, label='Adaptive blend')
+			ax.set_ylabel('Mean bkg (e⁻/s)', fontsize=11)
+			ax.legend(fontsize=9)
+			ax.set_title('Background adaptive Gaussian blend', fontsize=11)
+
+			# Panel 2: gradient and blend weight
+			ax = axes[1]
+			col_g = 'C1'; col_a = 'C2'
+			ax.plot(t, _nan_gaps(grad_all), color=col_g, lw=1,
+					label='|d(rough bkg)/dt|')
+			ax.set_ylabel('Gradient (e⁻/s/frame)', fontsize=11, color=col_g)
+			ax.tick_params(axis='y', labelcolor=col_g)
+			axr = ax.twinx()
+			axr.plot(t, _nan_gaps(alpha_all), color=col_a, lw=1, alpha=0.8,
+					 label='α (blend weight)')
+			axr.set_ylabel('α  (1=wide, 0=narrow)', fontsize=11, color=col_a)
+			axr.tick_params(axis='y', labelcolor=col_a)
+			axr.set_ylim(-0.05, 1.05)
+			ax.set_title('High gradient → α→0 (narrow filter)', fontsize=11)
+
+			# Panel 3: residuals
+			ax = axes[2]
+			ax.plot(t, _nan_gaps(av_bkg_raw - av_smooth), '.k', ms=1.5, alpha=0.4,
+					label='Residual (raw − smooth)')
+			ax.axhline(0, color='r', lw=0.8, ls='--')
+			ax.set_ylabel('Residual (e⁻/s)', fontsize=11)
+			ax.set_xlabel('Time (MJD)', fontsize=11)
+			ax.legend(fontsize=9)
+
+			plt.tight_layout()
+			plt.show()
+			if savename is not None:
+				plt.savefig(savename + '_bkg_smooth.pdf', bbox_inches='tight')
+
 	def get_ref(self,start = None, stop = None):
 		"""
 		Get reference image to use for subtraction and mask creation.
@@ -924,7 +1086,7 @@ class tessreduce():
 				ref_ind = ref_ind[0]
 			reference[reference <= 0] = np.nan
 			base = np.nanmin(reference)
-			reference -= base
+			# reference -= base
 			self.ref = reference
 			self.ref_ind = ref_ind
 			# self.flux -= base
@@ -2195,27 +2357,35 @@ class tessreduce():
 				if self.verbose > 0:
 					print('aligning images')
 				
-				try:
-					if self._shift_method  == 'centroid':
-						self.centroids_shifts_starfind()
-					elif self._shift_method == 'difference':
-						self.fit_shift()
-					else:
-						m = f'Shift method {self._shift_method} is not supported, choose from:\ncentroid\ndifference'
-						raise ValueError(m)
+				# try:
+				if self._shift_method  == 'centroid':
+					self.centroids_shifts_starfind()
+				elif self._shift_method == 'difference':
+					self.fit_shift()
+				elif self._shift_method == 'sep_core':
+					from .sep_aligner import SepAligner
+					aligner = SepAligner.from_tessreduce(self)
+					aligner.run()
+					aligner.smooth_shift(time=self.mjd,
+										 gap_thresh=0.5, # days
+										 update_shift=True)
+					self.shift = aligner.shift
+				else:
+					m = f'Shift method {self._shift_method} is not supported, choose from:\ncentroid\ndifference\nsep_core'
+					raise ValueError(m)
 					#if double_shift:
 					#self.shift_images()
 					#self.ref = deepcopy(self.flux[self.ref_ind])
 					
 					#self.shift_images()
 					
-				except:
-					print('Something went wrong, switching to serial')
-					self.parallel = False
-					if self._shift_method  == 'centroid':
-						self.centroids_shifts_starfind()
-					elif self._shift_method == 'minimize':
-						self.fit_shift()
+				# except:
+				# 	print('Something went wrong, switching to serial')
+				# 	self.parallel = False
+				# 	if self._shift_method  == 'centroid':
+				# 		self.centroids_shifts_starfind()
+				# 	elif self._shift_method == 'minimize':
+				# 		self.fit_shift()
 			else:
 				self.shift = np.zeros((len(self.flux),2))
 			
