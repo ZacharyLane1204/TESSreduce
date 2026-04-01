@@ -1234,8 +1234,8 @@ class tessreduce():
 				#shifts[i,:] = difference_shifts(f[i],m,self.eflux[i],eref)
 				shifts[i,:] = difference_shifts(f[i],m)
 		sraw = deepcopy(shifts)
-
-		shifts = Smooth_motion(shifts,self.tpf)
+		if smooth:
+			shifts = Smooth_motion(shifts,self.tpf)
 
 		if self.shift is not None:
 			self.shift += shifts
