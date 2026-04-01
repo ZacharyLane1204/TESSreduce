@@ -67,7 +67,8 @@ class tessreduce():
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
-				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None):
+				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
+				 smooth_motion=True):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -161,6 +162,7 @@ class tessreduce():
 		self._ref_type = ref_type
 		self._ref_time_window = ref_time_window
 		self._quality_bitmask = quality_bitmask
+		self._smooth_motion = smooth_motion
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -2362,14 +2364,15 @@ class tessreduce():
 				if self._shift_method  == 'centroid':
 					self.centroids_shifts_starfind()
 				elif self._shift_method == 'difference':
-					self.fit_shift()
+					self.fit_shift(smooth=self._smooth_motion)
 				elif self._shift_method == 'sep_core':
 					from .sep_aligner import SepAligner
 					aligner = SepAligner.from_tessreduce(self)
 					aligner.run()
-					aligner.smooth_shift(time=self.mjd,
-										 gap_thresh=0.5, # days
-										 update_shift=True)
+					if self._smooth_motion:
+						aligner.smooth_shift(time=self.mjd,
+											 gap_thresh=0.5, # days
+											 update_shift=True)
 					self.shift = aligner.shift
 				else:
 					m = f'Shift method {self._shift_method} is not supported, choose from:\ncentroid\ndifference\nsep_core'
