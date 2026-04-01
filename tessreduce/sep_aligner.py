@@ -653,12 +653,20 @@ class SepAligner:
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
-    def run(self, verbose: int = 0) -> 'SepAligner':
+    def run(self, time: Optional[np.ndarray] = None,
+            savgol_window: int = 25,
+            verbose: int = 0) -> 'SepAligner':
         """
-        Measure and store offsets for every frame.
+        Measure and store offsets for every frame, then smooth with a
+        Savitzky-Golay filter (order 3) if *time* is provided.
 
         Parameters
         ----------
+        time : (T,) array, optional
+            Observation times in days.  If provided, ``savgol_smooth()`` is
+            called automatically after alignment.
+        savgol_window : int
+            Window width passed to ``savgol_smooth()``.  Default 25.
         verbose : int
             joblib verbosity.  0 = silent (default).
 
@@ -712,6 +720,10 @@ class SepAligner:
 
         self.offsets = self._build_offsets_df(results)
         self.shift = self._build_shift_array(results, T)
+
+        if time is not None:
+            self.smooth_shift(time, method='savgol', savgol_window=savgol_window,
+                              update_shift=True)
 
         # Write back to tessreduce instance if constructed via from_tessreduce
         if hasattr(self, '_tr'):
@@ -795,20 +807,113 @@ class SepAligner:
 
     # ── Time-smoothed shifts ──────────────────────────────────────────────────
 
+    def savgol_smooth(self,
+                      time: np.ndarray,
+                      window: int = 25,
+                      gap_thresh: float = 0.5,
+                      update_shift: bool = True,
+                      plot: Optional[bool] = None,
+                      savename: Optional[str] = None,
+                      ) -> np.ndarray:
+        """
+        Smooth measured shifts with a 3rd-order Savitzky-Golay filter,
+        applied independently within each observing segment.
+
+        Parameters
+        ----------
+        time : (T,) array
+            Observation times in days.
+        window : int
+            Filter window width in frames.  Must be odd and > 3; even values
+            are incremented by 1.  Default 25.
+        gap_thresh : float
+            Cadence gap in days that marks a segment break.  Default 0.5.
+        update_shift : bool
+            If True (default), overwrite ``self.shift`` with the smoothed
+            values.
+        plot : bool, optional
+            Show diagnostic plot.  If None, reads ``self._tr.diagnostic_plot``
+            when constructed via ``from_tessreduce()``.
+        savename : str, optional
+            If provided, save the plot as ``<savename>_disp_corr.pdf``.
+
+        Returns
+        -------
+        smoothed : (T, 2) float32 ndarray
+        """
+        from scipy.signal import savgol_filter as _savgol
+
+        if self.shift is None:
+            raise RuntimeError("Call run() before savgol_smooth().")
+
+        T = len(self.shift)
+        t_arr = np.asarray(time, dtype=np.float64)
+
+        win = int(window)
+        if win % 2 == 0:
+            win += 1
+
+        diffs = np.diff(t_arr)
+        gap_idx = np.where(diffs > gap_thresh)[0]
+        seg_starts = np.concatenate([[0], gap_idx + 1])
+        seg_ends = np.concatenate([gap_idx, [T - 1]])
+        segments = [np.arange(s, e + 1)
+                    for s, e in zip(seg_starts, seg_ends)]
+
+        raw = self.shift.astype(np.float64).copy()
+        smoothed = raw.copy()
+
+        for seg_idx in segments:
+            n = len(seg_idx)
+            if n < 4:
+                continue
+            w = min(win, n if n % 2 == 1 else n - 1)
+            for axis in range(2):
+                smoothed[seg_idx, axis] = _savgol(
+                    raw[seg_idx, axis], window_length=w, polyorder=3)
+
+        smoothed = smoothed.astype(np.float32)
+        if update_shift:
+            self.shift = smoothed
+            if hasattr(self, '_tr'):
+                self._tr.shift = smoothed
+
+        if plot is None:
+            plot = getattr(getattr(self, '_tr', None), 'diagnostic_plot', False)
+        if plot:
+            self._plot_shifts(t_arr, raw, smoothed, gap_thresh, savename)
+
+        return smoothed
+
     def smooth_shift(self,
                      time: np.ndarray,
+                     method: str = 'savgol',
                      gap_thresh: float = 0.5,
                      length_scale: Optional[float] = None,
                      sigma_clip: float = 4.0,
                      sigma_clip_shifts: bool = False,
                      adaptive: bool = True,
                      adaptive_range: float = 3.0,
+                     median_filter_width: Optional[int] = 'auto',
+                     savgol_window: int = 25,
                      update_shift: bool = True,
                      plot: Optional[bool] = None,
                      savename: Optional[str] = None,
                      ) -> np.ndarray:
         """
-        Return a time-smoothed version of the measured shifts using a
+        Return a time-smoothed version of the measured shifts.
+
+        Parameters
+        ----------
+        method : {'savgol', 'gp'}
+            Smoothing method.  ``'savgol'`` (default) applies a 3rd-order
+            Savitzky-Golay filter with window ``savgol_window``.  ``'gp'``
+            uses the error-weighted Gaussian-process smoother.
+
+        All other parameters apply only when ``method='gp'``; ``savgol_window``
+        applies only when ``method='savgol'``.
+
+        GP smoother: return a time-smoothed version of the measured shifts using a
         Gaussian-process-inspired weighted smoother, with automatic gap
         detection and error-weighted fitting.
 
@@ -855,6 +960,12 @@ class SepAligner:
             from the base value.  ``adaptive_range=3`` means the kernel can
             be up to 3× wider or 3× narrower than ``length_scale``.
             Default 3.0.
+        median_filter_width : int or 'auto' or None
+            Maximum window width (in frames) for the adaptive median post-filter
+            applied after the GP smooth.  ``'auto'`` (default) sets the width
+            to match the GP length scale converted to frames.  ``None`` disables
+            the filter entirely.  Must be odd when specified as int; even values
+            are incremented by 1.
         sigma_clip_shifts : bool
             If True, enable outlier rejection before the GP fit.  Default False.
         sigma_clip : float
@@ -881,6 +992,11 @@ class SepAligner:
             Every frame is populated — masked frames receive the GP
             interpolated value.
         """
+        if method == 'savgol':
+            return self.savgol_smooth(
+                time, window=savgol_window, gap_thresh=gap_thresh,
+                update_shift=update_shift, plot=plot, savename=savename)
+
         if self.offsets is None:
             raise RuntimeError("Call run() before smooth_shift().")
 
@@ -899,14 +1015,20 @@ class SepAligner:
                       for s, e in zip(seg_starts, seg_ends)]
 
         # ── Default length scale ──────────────────────────────────────────
+        first = segments[0]
+        if len(first) > 1:
+            med_cad = float(np.median(np.diff(t_arr[first])))
+        else:
+            med_cad = float(np.median(diffs)) if len(diffs) > 0 else 1.0
         if length_scale is None:
-            # 5 × median cadence of first segment (or whole series if 1 seg)
-            first = segments[0]
-            if len(first) > 1:
-                med_cad = float(np.median(np.diff(t_arr[first])))
-            else:
-                med_cad = float(np.median(diffs)) if len(diffs) > 0 else 1.0
             length_scale = 5.0 * med_cad
+
+        # ── Resolve auto median filter width ─────────────────────────────
+        if median_filter_width == 'auto':
+            _mfw = max(3, int(round(length_scale / med_cad)))
+            if _mfw % 2 == 0:
+                _mfw += 1
+            median_filter_width = _mfw
 
         # ── Per-frame measurement weights  (1/σ²) ────────────────────────
         # shift[:,0] = -dy,  shift[:,1] = -dx  (tessreduce convention)
@@ -950,7 +1072,7 @@ class SepAligner:
             t_seg = t_arr[seg_idx]
 
             for axis, w_full in enumerate([w_dy, w_dx]):
-                vals = raw[seg_idx, axis]     # e.g. −dy for axis 0
+                vals = raw[seg_idx, axis].copy()     # e.g. −dy for axis 0
                 w_seg = w_full[seg_idx].copy()
 
                 # ── sigma-clip by value within segment ────────────────
@@ -973,6 +1095,31 @@ class SepAligner:
                 else:
                     sm = self._gp_smooth(t_seg, vals, w_seg, usable,
                                          length_scale)
+
+                # ── adaptive median post-filter ────────────────────────
+                if median_filter_width is not None and n >= 3:
+                    mfw_max = int(median_filter_width)
+                    mfw_min = 3
+
+                    grad = np.abs(np.gradient(sm, t_seg))
+                    grad_sm = np.convolve(grad, np.ones(3) / 3.0, mode='same')
+                    med_g = float(np.median(grad_sm))
+                    if med_g > 1e-30:
+                        norm = np.clip(grad_sm / (med_g * adaptive_range), 0.0, 1.0)
+                    else:
+                        norm = np.zeros(n)
+                    raw_w = mfw_max - norm * (mfw_max - mfw_min)
+                    win_arr = np.round(raw_w).astype(int)
+                    win_arr += 1 - win_arr % 2
+
+                    filtered = sm.copy()
+                    for i in range(n):
+                        hw = win_arr[i] // 2
+                        lo = max(0, i - hw)
+                        hi = min(n, i + hw + 1)
+                        filtered[i] = np.median(sm[lo:hi])
+                    sm = filtered
+
                 smoothed[seg_idx, axis] = sm
 
         # ── Fallback: any still-NaN positions get nearest-segment-edge ──
