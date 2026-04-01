@@ -354,7 +354,7 @@ def difference_shifts(image,ref):#,eimage,eref):
 		s = np.zeros((2)) * np.nan
 	return s
 
-def Smooth_motion(Centroids,tpf):
+def Smooth_motion(Centroids,tpf,skernel=25):
 	"""
 	Calculate the smoothed centroid shift 
 
@@ -374,11 +374,11 @@ def Smooth_motion(Centroids,tpf):
 
 	"""
 	smoothed = np.zeros_like(Centroids) * np.nan
-	skernel = int(len(tpf.flux) * 0.01) #simple way of making the smoothing window 10% of the duration
-	skernel = skernel // 2 +1
-	#skernel = 25
-	if skernel < 25:
-		skernel = 25
+	# skernel = int(len(tpf.flux) * 0.01) #simple way of making the smoothing window 10% of the duration
+	# skernel = skernel // 2 +1
+	# #skernel = 25
+	# if skernel < 25:
+	# 	skernel = 25
 	try:
 		try:
 			split = np.where(np.diff(tpf.time.mjd) > 0.5)[0][0] + 1
