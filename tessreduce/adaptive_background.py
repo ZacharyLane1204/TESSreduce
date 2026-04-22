@@ -57,7 +57,11 @@ def get_tessvectors(sector, camera, data_path=None):
             return pd.read_csv(local, comment='#', index_col=False)
 
     url = _TESSVECTORS_REMOTE.format(sector=sector, camera=camera)
-    return pd.read_csv(url, comment='#', index_col=False)
+    try:
+        df = pd.read_csv(url, comment='#', index_col=False)
+    except:
+        df = None
+    return df
 
 
 def _interpolate_angles(time_mjd, df):
@@ -65,7 +69,7 @@ def _interpolate_angles(time_mjd, df):
 
     TESSVectors MidTime is BTJD (BJD − 2457000); MJD = BTJD + 57000.
     """
-    btjd = time_mjd - 57000.0
+    btjd = time_mjd - 56999.5
     vec_t = df['MidTime'].values
     earth = np.interp(btjd, vec_t, df['Earth_Camera_Angle'].values)
     moon = np.interp(btjd, vec_t, df['Moon_Camera_Angle'].values)
@@ -429,9 +433,12 @@ class AdaptiveBackground:
         self.windows = None
         self.variability = None
         self._windows_pre_smooth = None
+        self.earth_angle = None
+        self.moon_angle = None
 
         self._df = get_tessvectors(sector, camera, data_path=data_path)
-        self.earth_angle, self.moon_angle = _interpolate_angles(self.time, self._df)
+        if self._df is not None:
+            self.earth_angle, self.moon_angle = _interpolate_angles(self.time, self._df)
 
     def smooth(
         self,
