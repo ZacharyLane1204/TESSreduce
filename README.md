@@ -1,4 +1,8 @@
-[![Build and Test [Python 3.7, 3.8, 3.9]](https://github.com/CheerfulUser/TESSreduce/actions/workflows/build.yml/badge.svg)](https://github.com/CheerfulUser/TESSreduce/actions/workflows/build.yml)
+[![Build and Test](https://github.com/CheerfulUser/TESSreduce/actions/workflows/build.yml/badge.svg)](https://github.com/CheerfulUser/TESSreduce/actions/workflows/build.yml)
+[![PyPI version](https://img.shields.io/pypi/v/tessreduce.svg)](https://pypi.org/project/tessreduce/)
+[![Python versions](https://img.shields.io/pypi/pyversions/tessreduce.svg)](https://pypi.org/project/tessreduce/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![DOI](https://img.shields.io/badge/DOI-10.3847%2F1538--3881%2Fac2c2e-blue.svg)](https://doi.org/10.3847/1538-3881/ac2c2e)
 
 ![plot](./figs/header.png)
 
