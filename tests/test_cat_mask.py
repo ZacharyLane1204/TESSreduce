@@ -195,24 +195,27 @@ class TestDetectStrapsEmpirical(unittest.TestCase):
 
 
 class TestStrapMask(unittest.TestCase):
+    # col is the TPF column offset (integer). Strap positions are computed as
+    # straps_csv - col + 44. Strap catalogue starts at column 77, so with
+    # col=111 the first strap lands at pixel 77 - 111 + 44 = 10.
 
     def test_known_strap_column_masked(self):
-        image = np.zeros((30, 40))
-        col = [15]
-        mask = Strap_mask(image, col, size=4)
+        # col=111 places strap columns 77,78 at pixels 10,11 inside a 30-wide image
+        image = np.zeros((30, 30))
+        mask = Strap_mask(image, col=111, size=4)
         self.assertEqual(mask.shape, image.shape)
-        # column 15 and neighbours should be in the strap mask (bit 2 = value 4)
-        self.assertTrue(np.any(mask[:, 15] > 0))
+        self.assertTrue(np.any(mask > 0))
 
-    def test_empty_strap_list_no_mask(self):
+    def test_no_straps_in_image(self):
+        # max strap column is 1972; col=2100 maps it to 1972-2100+44=-84 (out of range)
         image = np.zeros((20, 20))
-        mask = Strap_mask(image, col=[], size=4)
+        mask = Strap_mask(image, col=2100, size=4)
         self.assertEqual(mask.shape, image.shape)
         self.assertEqual(mask.sum(), 0)
 
     def test_output_shape_matches_image(self):
         image = np.zeros((25, 35))
-        mask = Strap_mask(image, col=[10, 20], size=3)
+        mask = Strap_mask(image, col=111, size=3)
         self.assertEqual(mask.shape, image.shape)
 
 

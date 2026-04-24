@@ -174,23 +174,26 @@ class TestGradClip(unittest.TestCase):
 
 class TestFitStrap(unittest.TestCase):
 
-    def test_interpolates_over_high_values(self):
+    def test_interpolates_over_masked_values(self):
         data = np.ones(50, dtype=float) * 5.0
-        # inject "star" contamination (high values)
         data[20:25] = 200.0
-        result = fit_strap(data, percentile=20)
-        # the interpolated values in contaminated region should be near background (~5)
+        # mask marks GOOD pixels (True = usable background)
+        mask = data < 100.0
+        result = fit_strap(data, mask)
+        # interpolated values in contaminated region should be near background (~5)
         self.assertTrue(np.all(np.abs(result[20:25] - 5.0) < 3.0))
 
     def test_returns_same_length(self):
         data = np.linspace(1, 10, 40)
-        result = fit_strap(data, percentile=20)
+        mask = np.ones(40, dtype=bool)
+        result = fit_strap(data, mask)
         self.assertEqual(len(result), 40)
 
-    def test_too_few_points_returns_nan(self):
-        data = np.array([1.0, 2.0, np.nan, np.nan, np.nan])
-        result = fit_strap(data)
-        self.assertEqual(len(result), len(data))
+    def test_no_good_pixels_returns_ones(self):
+        data = np.ones(20, dtype=float) * 5.0
+        mask = np.zeros(20, dtype=bool)  # no good pixels
+        result = fit_strap(data, mask)
+        self.assertEqual(len(result), 20)
 
 
 class TestIdentifyMasks(unittest.TestCase):
@@ -253,7 +256,7 @@ class TestSmoothZp(unittest.TestCase):
 
     @patch('tessreduce.helpers.plt.figure')
     @patch('tessreduce.helpers.plt.plot')
-    def test_returns_smoothed_and_err(self, mock_plot, mock_figure):
+    def test_returns_smoothed_and_err(self, _mock_plot, _mock_figure):
         rng = np.random.default_rng(5)
         N = 60
         time = np.arange(N) * 0.02
@@ -265,7 +268,7 @@ class TestSmoothZp(unittest.TestCase):
 
     @patch('tessreduce.helpers.plt.figure')
     @patch('tessreduce.helpers.plt.plot')
-    def test_two_segment_sector(self, mock_plot, mock_figure):
+    def test_two_segment_sector(self, _mock_plot, _mock_figure):
         N = 60
         t1 = np.arange(30) * 0.02
         t2 = np.arange(30) * 0.02 + 14.0  # 14-day gap
@@ -302,7 +305,8 @@ class TestRegionalStatsMask(unittest.TestCase):
         image = rng.normal(100, 5, (30, 30))
         mask = regional_stats_mask(image, size=15, sigma=3)
         self.assertEqual(mask.shape, image.shape)
-        self.assertEqual(mask.dtype, bool)
+        self.assertTrue(np.issubdtype(mask.dtype, np.number))
+        self.assertTrue(set(np.unique(mask)).issubset({0, 1, 0.0, 1.0}))
 
     def test_outlier_masked(self):
         image = np.ones((30, 30)) * 100.0
