@@ -128,3 +128,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Binary outputs and figures (use git add -f to force-add specific files)
+*.png
+*.pdf
+!figs/*.png
