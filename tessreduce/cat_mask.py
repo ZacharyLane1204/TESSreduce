@@ -200,29 +200,103 @@ def Big_sat(table,Image,scale=1):
     satmasks = np.array(satmasks)
     return satmasks
 
-def Strap_mask(Image,col,size=4):
+def detect_straps_empirical(flux_cube, size=4, min_snr=3.0):
     """
-    Make a mask for the electrical straps on TESS CCDs.
+    Detect strap columns empirically from a flux cube by identifying columns
+    whose flux correlates more strongly with the scattered light background
+    than their immediate neighbours.
+
+    Straps have a multiplicative QE enhancement that scales with scattered
+    light, so during bright frames they are elevated relative to adjacent
+    non-strap columns.  The detection works by:
+      1. Forming a peak/quiet ratio profile (median over rows).
+      2. Subtracting a running-median trend to remove broad spatial gradients.
+      3. Flagging columns with residual ratio significantly above noise.
 
     Parameters
     ----------
+    flux_cube : ndarray (T, X, Y)
+        Raw flux cube.
+    size : int
+        Half-width in pixels to expand detected strap columns into a mask.
+    min_snr : float
+        Detection threshold in units of the residual profile's sigma.
 
+    Returns
+    -------
+    strap_cols : ndarray of int
+        Column indices identified as straps.
+    """
+    from astropy.stats import sigma_clipped_stats
+    from scipy.ndimage import median_filter
+
+    T, X, Y = flux_cube.shape
+    av = np.nanmedian(flux_cube, axis=(1, 2))
+
+    # Use the top and bottom 20% of frames for peak and quiet
+    n = max(int(T * 0.2), 5)
+    order = np.argsort(av)
+    quiet_idx = order[:n]
+    peak_idx  = order[-n:]
+
+    prof_peak  = np.nanmedian(flux_cube[peak_idx],  axis=(0, 1))   # (Y,)
+    prof_quiet = np.nanmedian(flux_cube[quiet_idx], axis=(0, 1))   # (Y,)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = prof_peak / prof_quiet
+    ratio = np.where(np.isfinite(ratio), ratio, 1.0)
+
+    # Remove broad spatial trend with a wide median filter
+    trend = median_filter(ratio, size=max(21, Y // 10))
+    residual = ratio - trend
+
+    _, med_res, std_res = sigma_clipped_stats(residual)
+    thresh = med_res + min_snr * std_res
+
+    # Expand each detected column by ±size//2 to match catalogue mask width
+    expanded = set()
+    for c in np.where(residual > thresh)[0]:
+        for offset in range(-(size // 2), size // 2 + 1):
+            expanded.add(int(c) + offset)
+    strap_cols = np.array(sorted(c for c in expanded if 0 <= c < Y), dtype=int)
+    return strap_cols
+
+
+def Strap_mask(Image, col, size=4, flux_cube=None):
+    """
+    Make a mask for the electrical straps on TESS CCDs.
+
+    Attempts catalogue-based strap positions first.  If the TPF column offset
+    is zero (no WCS stored) or no catalogue straps fall inside the image, falls
+    back to empirical detection from the flux cube if one is provided.
+
+    Parameters
+    ----------
     Image : ArrayLike
         Flux of a reference image.
     col : int
-        Reference index of TPF columns.
+        Reference index of TPF columns (tpf.column + col_offset).
     size : int, optional
-        Width of the strap in pixels. The default is 4.
+        Width of the strap mask in pixels. The default is 4.
+    flux_cube : ndarray (T, X, Y), optional
+        Full flux time series used for empirical strap detection fallback.
     """
+    straps_csv = pd.read_csv(package_directory + 'tess_straps.csv')['Column'].values
+    strap_in_tpf = straps_csv - col + 44
+    strap_in_tpf = strap_in_tpf[(strap_in_tpf > 0) & (strap_in_tpf < Image.shape[1])]
+
+    # Fall back to empirical detection only when catalogue positions are
+    # unavailable (no straps land in the image after applying col_offset).
+    if len(strap_in_tpf) == 0 and flux_cube is not None:
+        strap_in_tpf = detect_straps_empirical(flux_cube, size=size)
 
     strap_mask = np.zeros_like(Image)
-    straps = pd.read_csv(package_directory + 'tess_straps.csv')['Column'].values - col + 44
-    strap_in_tpf = straps[((straps > 0) & (straps < Image.shape[1]))]
-    strap_mask[:,strap_in_tpf] = 1
-    big_strap = fftconvolve(strap_mask,np.ones((size,size)),mode='same') > .5
+    valid = strap_in_tpf[(strap_in_tpf >= 0) & (strap_in_tpf < Image.shape[1])]
+    strap_mask[:, valid] = 1
+    big_strap = fftconvolve(strap_mask, np.ones((size, size)), mode='same') > .5
     return big_strap
 
-def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigma=3,col_offset=0):
+def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigma=3,col_offset=0,flux_cube=None):
 
 	"""
 	Make a source mask from the PS1 and Gaia catalogs.
@@ -281,8 +355,8 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 
 	sat = (np.nansum(sat,axis=0) > 0).astype(int) * 2 # assign 2 bit 
 	
-	if strapsize > 0: 
-		strap = Strap_mask(image,tpf.column+col_offset,strapsize).astype(int) * 4 # assign 4 bit 
+	if strapsize > 0:
+		strap = Strap_mask(image,tpf.column+col_offset,strapsize,flux_cube=flux_cube).astype(int) * 4 # assign 4 bit
 	else:
 		strap = np.zeros_like(image,dtype=int)
 

@@ -50,34 +50,43 @@ def grad_clip(data,box_size=100):
     gradind = gradind > 0
     return gradind 
 
-def fit_strap(data):
+def fit_strap(data, percentile=20):
     """
-    interpolate over missing data
+    Interpolate over stellar-contaminated rows in strap (or neighbour) columns.
 
+    Stellar flux is strictly additive, so the true background always sits at
+    the *low* end of the pixel-value distribution in a strap column.  The
+    original 50th-percentile threshold discards half the data unconditionally
+    and fails completely when more than half of the rows in the column are
+    contaminated by stars (the median is then elevated into the stellar
+    signal).  Using a lower percentile (default 20th) means contamination must
+    exceed 80 % of rows before the threshold is biased into stellar flux,
+    making rejection far more robust in crowded fields.
+
+    Parameters
+    ----------
+    data : array_like
+        1-D array of pixel values along a single column.
+    percentile : float, optional
+        Percentile of the finite pixel values used as the upper clip limit.
+        Values at or above this level are treated as stellar contamination and
+        replaced with NaN before interpolation.  Default is 20 (was 50).
     """
-    
+
     x = np.arange(0,len(data))
     y = data.copy()
     p =np.ones_like(x) * np.nan
-    #y[~grad_clip(y)] = np.nan
     if len(y[np.isfinite(y)]) > 10:
-        lim = np.percentile(y[np.isfinite(y)],50)
+        lim = np.percentile(y[np.isfinite(y)], percentile)
         y[y >= lim] = np.nan
 
         finite = np.isfinite(y)
-        
+
         if len(y[finite]) > 5:
             finite = np.isfinite(y)
-            #y = median_clipping(y)
-            finite = np.where(finite)[0]
-            finite = np.isfinite(y)
-            #y[finite] = savgol_filter(y[finite],11,3)
-            p = interp1d(x[finite], y[finite],bounds_error=False,fill_value=np.nan,kind='nearest')
+            p = interp1d(x[finite], y[finite],bounds_error=False,fill_value=np.nan,kind='linear')
             p = p(x)
-        #p[np.isfinite(p)] = savgol_filter(p[np.isfinite(p)],31,1)
     return p
-
-from copy import deepcopy
 
 def calc_strap_factor(i,breaks,size,av_size,normals,data):
     qe = np.ones_like(data) * 1. * np.nan
