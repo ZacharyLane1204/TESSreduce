@@ -45,12 +45,10 @@ import warnings
 # nuke warnings because sigma clip is extremely annoying 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=RuntimeWarning) 
-warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
+_visible_dep_warning = getattr(getattr(np, 'exceptions', np), 'VisibleDeprecationWarning', None)
+if _visible_dep_warning is not None:
+    warnings.filterwarnings("ignore", category=_visible_dep_warning)
 pd.options.mode.chained_assignment = None
-with warnings.catch_warnings():
-	warnings.simplefilter("ignore")
-	sigma_clip
-	sigma_clipped_stats
 
 # set the package directory so we can load in a file later
 package_directory = os.path.dirname(os.path.abspath(__file__)) + '/'
@@ -148,7 +146,7 @@ class tessreduce():
 		self.imaging = imaging
 		self.parallel = parallel
 		self._col_offset = col_offset
-		if type(num_cores) == str:
+		if isinstance(num_cores, str):
 			self.num_cores = multiprocessing.cpu_count()
 		else:
 			self.num_cores = num_cores
@@ -219,21 +217,10 @@ class tessreduce():
 				self.ra = obs_list['RA'].to_numpy()[0]
 				self.dec = obs_list['DEC'].to_numpy()[0]
 				self.sector = obs_list['Sector'].to_numpy()
-			if isinstance(obs_list,list):
-				obs_list = np.array(obs_list,dtype=object)
-				if len(obs_list.shape) > 1:
-					obs_list = obs_list[obs_list[:,3].astype('bool')][0]
-				self.ra = obs_list[0]
-				self.dec = obs_list[1]
-				self.sector = obs_list[2]
-			elif isinstance(obs_list, pd.DataFrame):
-				self.ra = obs_list['RA'].to_numpy()[0]
-				self.dec = obs_list['DEC'].to_numpy()[0]
-				self.sector = obs_list['Sector'].to_numpy()
 
 		# Generate coordinate information from 'tpf'
 		if tpf is not None:
-			if type(tpf) == str:
+			if isinstance(tpf, str):
 				self.tpf = lk.TessTargetPixelFile(tpf,quality_bitmask=self._quality_bitmask)
 			self.flux = strip_units(self.tpf.flux)
 			if self._use_error_image:
@@ -273,7 +260,7 @@ class tessreduce():
 
 		"""
 
-		if ((self.ra is None) | (self.dec is None)) & (self.name is None):
+		if ((self.ra is None) or (self.dec is None)) and (self.name is None):
 			return False
 		else:
 			return True
@@ -309,7 +296,7 @@ class tessreduce():
 		# Restrict catalogue to only objects inside cutout
 		ind = (((x > 0) & (y > 0)) & 
 		 	  ((x < (self.flux.shape[2])) & (y < (self.flux.shape[1]))))
-		result = result.iloc[ind]
+		result = result[ind]
 
 		self.gaia = result
 
@@ -334,7 +321,7 @@ class tessreduce():
 
 		"""
 
-		if type(phot_method) == str:
+		if isinstance(phot_method, str):
 			method = phot_method.lower()
 			if (method == 'psf') | (method == 'aperture'):
 				self.phot_method = method
@@ -342,7 +329,7 @@ class tessreduce():
 				m = f'The input method "{method}" is not supported, please select either "psf", or "aperture".'
 				raise ValueError(m)
 		else:
-			m = 'phot_mehtod must be a string equal to either "psf", or "aperture".'
+			m = 'phot_method must be a string equal to either "psf", or "aperture".'
 			raise ValueError(m)
 
 	def __clean_lk_cache(self,cache_dir=None):
@@ -410,11 +397,10 @@ class tessreduce():
 		tpf = tess.download(quality_bitmask=quality_bitmask,cutout_size=size,download_dir=cache_dir)
 		if not cache:
 			try:
-				call = f'rm {tpf.path}'
-				os.system(call)
+				os.remove(tpf.path)
 				if self.verbose > 0:
 					print('Cache removed')
-			except:
+			except OSError:
 				print(f'Failed to remove: {tpf.path}')
 
 		# Check to ensure it succeeded
@@ -586,14 +572,14 @@ class tessreduce():
 		qes = np.ones_like(qe)
 		qes[:,:,:] = med[:,np.newaxis,:]
 		qes[np.isnan(qes)] = 1
-		
+
 		av_bkg = np.sum(self.bkg,axis=(1,2))/(self.bkg.shape[1]*self.bkg.shape[2])
 		m,med,std = sigma_clipped_stats(av_bkg)
 		ind = av_bkg < med + 5*std
 		breaks = np.where(np.diff(time[ind]) > 0.5)[0]+1
 		breaks = np.insert(breaks, 0, 0)
 		breaks = np.append(breaks, len(time[ind]))
-		
+
 		new_qes = deepcopy(qes)
 		ind_where = np.where(ind)[0]
 		for i in range(len(breaks)-1):
@@ -601,12 +587,10 @@ class tessreduce():
 				window_size = int(abs(breaks[i]-breaks[i+1])/4)
 				if window_size/2 == window_size//2:
 					window_size += 1
-				#if window_size > abs(breaks[i]-breaks[i+1])/4:
-
 				seg_idx = ind_where[breaks[i]:breaks[i+1]]
 				sav = savgol_filter(qes[ind][breaks[i]:breaks[i+1]], window_size, 1, axis=0)
 				new_qes[seg_idx] = sav
-		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment 
+		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment
 		self.qe = new_qes
 
 	def background(self,gauss_smooth=2,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
@@ -694,11 +678,11 @@ class tessreduce():
 			self.bkg *= self.qe
 
 		from .adaptive_background import AdaptiveBackground
-		print('adaptive bkg')
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores) 
-		smoothed = smoother.smooth().smoothed
-		self.bkg = smoothed
+		if smoother._df is not None:
+			smoothed = smoother.smooth().smoothed
+			self.bkg = smoothed
 		#self._bkg_temporal_smooth()
 		#self._bkg_adaptive_smooth()
 
@@ -759,8 +743,7 @@ class tessreduce():
 				bkg_3 = Parallel(n_jobs=self.num_cores)(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
 															for i in np.arange(len(dist_mask)))
 			else:
-				bkg_3 = []
-				bkg_smth = np.zeros_like(dist_mask)
+				bkg_3 = np.zeros_like(self.bkg)
 				for i in range(len(dist_mask)):
 					bkg_3[i] = parallel_bkg3(self.bkg[i],dist_mask[i])
 			self.bkg = np.array(bkg_3)
@@ -784,7 +767,7 @@ class tessreduce():
 			bkg_clip = Parallel(n_jobs=self.num_cores)(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
-			bkg_clip = []
+			bkg_clip = np.zeros_like(self.bkg)
 			for i in range(len(self.bkg)):
 				bkg_clip[i] = clip_background(self.bkg[i],self.mask,ideal_size)
 		self.bkg = np.array(bkg_clip)
@@ -810,7 +793,7 @@ class tessreduce():
 			bkg_clip = Parallel(n_jobs=self.num_cores)(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
-			bkg_clip = []
+			bkg_clip = np.zeros_like(self.bkg)
 			for i in range(len(self.bkg)):
 				bkg_clip[i] = grad_clip_fill_bkg(self.bkg[i],max_size)
 		self.bkg = np.array(bkg_clip)
@@ -1249,8 +1232,9 @@ class tessreduce():
 			plt.figure(figsize=(1.5*fig_width,1*fig_width))
 			plt.plot(t,sraw[:,0],'.',label='Row shift',alpha = 0.5)
 			plt.plot(t,sraw[:,1],'.',label='Col shift',alpha = 0.5)
-			plt.plot(t,shifts[:,0],'-',label='Smoothed row shift')
-			plt.plot(t,shifts[:,1],'-',label='Smoothed col shift')
+			if smooth:
+				plt.plot(t,shifts[:,0],'-',label='Smoothed row shift')
+				plt.plot(t,shifts[:,1],'-',label='Smoothed col shift')
 			plt.ylabel('Shift (pixels)',fontsize=15)
 			plt.xlabel('Time (MJD)',fontsize=15)
 			plt.legend()
