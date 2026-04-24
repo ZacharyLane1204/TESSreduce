@@ -132,4 +132,5 @@ dmypy.json
 # Binary outputs and figures (use git add -f to force-add specific files)
 *.png
 *.pdf
+*.npy
 !figs/*.png
