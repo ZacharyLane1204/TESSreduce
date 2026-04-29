@@ -131,10 +131,10 @@ class tessreduce():
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
 				 reduce=True,align=True,diff=True,corr_correction=True,kernel_match=False,calibrate=True,sourcehunt=True,
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
-				 savename=None,quality_bitmask='default',cache_dir=None,cache=True,catalogue_path=False,
+				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=True):
+				 smooth_motion=True,orbit_ref=False):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -211,6 +211,7 @@ class tessreduce():
 		self.corr_correction = corr_correction
 		self.diff = diff
 		self.kernel_match = kernel_match
+		self.orbit_ref = orbit_ref
 		self.imaging = imaging
 		self.parallel = parallel
 		self._col_offset = col_offset
@@ -1636,8 +1637,31 @@ class tessreduce():
 		tar[nan_ind] = np.nan
 		tar_err[nan_ind] = np.nan
 
-		#tar[tar_err > 100] = np.nan
-		#sky_med[tar_err > 100] = np.nan
+		# ── Orbit ref flux correction ──────────────────────────────────────────
+		if self.orbit_ref and hasattr(self, 'orbit_refs') and hasattr(self, 'orbit_segments'):
+			orb_flux = {}
+			orb_err  = {}
+			for seg, ref_im in self.orbit_refs.items():
+				f = np.nansum(ref_im * ap_tar) - np.nanmedian(ref_im * ap_sky) * tar_ap**2
+				sky_vals = ref_im * ap_sky
+				e = np.nanstd(sky_vals[np.isfinite(sky_vals)]) * tar_ap**2
+				orb_flux[seg] = f
+				orb_err[seg]  = e
+
+			# primary = orbit whose ref has lowest stddev
+			primary_seg = min(self.orbit_refs, key=lambda s: np.nanstd(self.orbit_refs[s]))
+			f_primary   = orb_flux[primary_seg]
+			e_primary   = orb_err[primary_seg]
+
+			for seg in self.orbit_refs:
+				if seg == primary_seg:
+					continue
+				delta = orb_flux[seg] - f_primary
+				delta_err = np.sqrt(orb_err[seg]**2 + e_primary**2)
+				if np.abs(delta) > delta_err:
+					mask = self.orbit_segments == seg
+					tar[mask] += delta
+
 		if self.tpf is not None:
 			time = self.tpf.time.mjd
 		lc = np.array([time, tar, tar_err])
@@ -2094,6 +2118,9 @@ class tessreduce():
 			raise ValueError(e)
 		if eflux is None:
 			eflux = self.eflux
+		if eflux is None:
+			f = strip_units(flux)
+			eflux = np.nanstd(f, axis=(1, 2))[:, np.newaxis, np.newaxis] * np.ones_like(f)
 
 		if (xPix is None) | (yPix is None):
 			xPix = flux.shape[2]//2
@@ -2297,6 +2324,30 @@ class tessreduce():
 		eflux = np.array(eflux)
 		return flux, eflux
 
+
+	def orbit_ref_subtract(self):
+		"""
+		Subtract a per-orbit reference from each orbit's frames.
+
+		Orbit assignments are obtained from TESSVectors if available, otherwise
+		derived from time gaps > 0.5 days. For each orbit the reference is the
+		median stack of that orbit's frames. A smoothed additive correction maps
+		the primary orbit reference onto each secondary orbit before subtraction.
+
+		Updates self.flux in place and stores self.orbit_segments.
+		"""
+		sector = self.tpf.sector if self.tpf is not None else None
+		camera = self.tpf.camera if self.tpf is not None else None
+		flux, segments, orbit_refs = orbit_ref_subtract(
+			strip_units(self.flux), self.mjd,
+			sector=sector, camera=camera,
+			vector_path=self._vector_path)
+		self.flux = flux
+		self.orbit_segments = segments
+		self.orbit_refs = orbit_refs
+		if self.verbose > 0:
+			orbs, counts = np.unique(segments, return_counts=True)
+			print(f'Orbit ref subtraction: {dict(zip(orbs, counts))} frames per orbit')
 
 	def kernel_matching(self,size=7,diff=True):
 		if diff:
@@ -2544,6 +2595,7 @@ class tessreduce():
 				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,gauss_smooth=1,interpolate=False)
 				self._grad_bkg_clip()
 				self.flux -= self.bkg
+				
 				if self.corr_correction:
 					if self.verbose > 0:
 						print('background correlation correction')
@@ -2552,6 +2604,11 @@ class tessreduce():
 					self.kernel_matching(diff=self.diff)
 					if self.verbose > 0:
 						print('kernels matched')
+
+				if self.orbit_ref:
+					if self.verbose > 0:
+						print('orbit ref subtraction')
+					self.orbit_ref_subtract()
 
 			if self.calibrate:
 				print('field calibration')

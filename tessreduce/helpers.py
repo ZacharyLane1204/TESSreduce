@@ -1486,3 +1486,104 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 
 	return bkg_fixed
 
+
+def get_orbit_segments(times_mjd, sector=None, camera=None, vector_path=None,
+					   gap_threshold=0.5):
+	"""
+	Assign each frame to an orbit segment.
+
+	Tries to use TESSVectors (FFI cadence) to get official Segment assignments.
+	Falls back to splitting on time gaps > gap_threshold days if unavailable.
+
+	Returns
+	-------
+	segments : ndarray (T,) of int  — 1-indexed orbit labels
+	"""
+	import pandas as pd
+
+	if sector is not None and camera is not None:
+		fname = f'TessVectors_S{sector:03d}_C{camera}_FFI.csv'
+		url   = ('https://heasarc.gsfc.nasa.gov/docs/tess/data/TESSVectors/'
+				 f'Vectors/FFI_Cadence/{fname}')
+		df = None
+		if vector_path is not None:
+			local = os.path.join(vector_path, fname)
+			if os.path.isfile(local):
+				try:
+					df = pd.read_csv(local, comment='#', index_col=False)
+				except Exception:
+					df = None
+		if df is None:
+			try:
+				df = pd.read_csv(url, comment='#', index_col=False)
+			except Exception:
+				df = None
+
+		if df is not None:
+			times_btjd = times_mjd - 56999.5
+			vec_t   = df['MidTime'].values
+			vec_seg = df['Segment'].values
+			idx     = np.searchsorted(vec_t, times_btjd).clip(0, len(vec_t) - 1)
+			return vec_seg[idx].astype(int)
+
+	# Fallback: split on large time gaps
+	diffs    = np.diff(times_mjd)
+	breaks   = np.where(diffs > gap_threshold)[0] + 1
+	segments = np.ones(len(times_mjd), dtype=int)
+	for k, b in enumerate(breaks, start=2):
+		segments[b:] = k
+	return segments
+
+
+def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
+					   vector_path=None, gap_threshold=0.5):
+	"""
+	Subtract a per-orbit reference from each orbit's frames.
+
+	For each orbit the reference is the median stack of that orbit's frames.
+	The orbit with the lowest stddev reference is used as the primary; for all
+	other orbits a smoothed additive correction is derived from the difference
+	between their reference and the primary, then applied before subtracting.
+
+	Parameters
+	----------
+	flux          : ndarray (T, NY, NX)
+	times_mjd     : ndarray (T,)
+	sector, camera: int — used to fetch TESSVectors orbit assignments
+	vector_path   : str or None — local directory for cached TESSVectors files
+	gap_threshold : float — fallback gap size in days if TESSVectors unavailable
+
+	Returns
+	-------
+	result   : ndarray (T, NY, NX)
+	segments : ndarray (T,)
+	"""
+	from scipy.ndimage import gaussian_filter
+
+	segments = get_orbit_segments(times_mjd, sector=sector, camera=camera,
+								  vector_path=vector_path,
+								  gap_threshold=gap_threshold)
+	orbs = np.unique(segments)
+
+	orbit_refs = {s: np.nanmedian(flux[segments == s], axis=0) for s in orbs}
+	stds       = {s: np.nanstd(orbit_refs[s]) for s in orbs}
+	primary    = min(stds, key=stds.get)
+	ref_primary = orbit_refs[primary]
+
+	# Smooth sigma scales with image size — spans ~1/8 of the smaller axis
+	NY, NX    = flux.shape[1], flux.shape[2]
+	smooth_sigma = max(min(NY, NX) // 8, 5)
+
+	result = np.empty_like(flux)
+	for s in orbs:
+		mask = segments == s
+		if s == primary:
+			result[mask] = flux[mask] - ref_primary
+		else:
+			diff       = orbit_refs[s] - ref_primary
+			correction = gaussian_filter(diff, sigma=smooth_sigma)
+			matched    = ref_primary + correction
+			result[mask] = flux[mask] - matched
+
+	return result, segments, orbit_refs
+
