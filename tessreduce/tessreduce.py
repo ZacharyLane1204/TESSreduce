@@ -58,6 +58,74 @@ inches_per_pt = 1.0/72.27				# Convert pt to inches
 golden_mean = (np.sqrt(5)-1.0)/2.0		 # Aesthetic ratio
 fig_width = fig_width_pt*inches_per_pt  # width in inches
 
+def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, sigma=3.0):
+	"""
+	Fit and subtract a smooth 2D residual surface per frame using photutils
+	Background2D. Operates on (flux - bkg) to capture large-scale structure
+	missed by the primary background estimation.
+
+	Parameters
+	----------
+	bkg : np.ndarray (T, X, Y)
+		Current background estimate; updated in-place.
+	flux : np.ndarray (T, X, Y)
+		Raw flux cube.
+	bkgmask : np.ndarray (X, Y) or (T, X, Y)
+		Background mask as produced by the background function: NaN where
+		pixels are excluded (sources/straps), 1.0 where valid background.
+		If 3D, a pixel is excluded if it is NaN in any frame.
+	box_size : int
+		Side length of the background mesh boxes in pixels.
+	filter_size : int
+		Size of the median filter applied to the mesh before interpolation.
+	sigma : float
+		Sigma threshold for iterative sigma-clipping within each box.
+
+	Returns
+	-------
+	bkg : np.ndarray (T, X, Y)
+		Background cube with the per-frame 2D surface added.
+	"""
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	from joblib import Parallel, delayed
+
+	sc = SigmaClip(sigma=sigma, maxiters=5)
+	estimator = MedianBackground()
+
+	bkgmask = np.asarray(bkgmask)
+	if bkgmask.ndim == 3:
+		exclude_mask = np.any(np.isnan(bkgmask), axis=0)
+	else:
+		exclude_mask = np.isnan(bkgmask)
+
+	def _fit_frame(residual):
+		finite_vals = residual[~exclude_mask & np.isfinite(residual)]
+		med = np.nanmedian(finite_vals)
+		std = np.nanstd(finite_vals)
+		transient_mask = exclude_mask | (residual > med + 5 * std)
+		try:
+			b = Background2D(
+				residual,
+				box_size=box_size,
+				filter_size=filter_size,
+				sigma_clip=sc,
+				bkg_estimator=estimator,
+				mask=transient_mask,
+				fill_value=0.0,
+			)
+			return b.background
+		except Exception:
+			return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+
+	n_jobs = -1
+	residuals = flux - bkg
+	corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_frame)(residuals[i]) for i in range(flux.shape[0]))
+	bkg += np.array(corrections)
+
+	return bkg
+
+
 class tessreduce():
 
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
@@ -460,7 +528,7 @@ class tessreduce():
 			mask, cat = Cat_mask(self.tpf,catalogue_path,maglim,scale,strapsize,col_offset=self._col_offset)
 
 		# Generate sky background as the inverse of mask
-		sky = ((mask & 1)+1 ==1) * 1.
+		sky = ((mask & 1)+1 == 1) * 1.
 		sky[sky==0] = np.nan
 		tmp = np.nansum(data*sky,axis=(1,2))
 		tmp[tmp==0] = 1e12 # random big number 
@@ -483,7 +551,7 @@ class tessreduce():
 		cmask = convolve(cmask,kern)
 
 		fullmask = mask | cmask
-		sky = ((fullmask & 1)+1 ==1) * 1.
+		sky = ((fullmask & 1)+1 == 1) * 1.
 		sky[sky==0] = np.nan
 		masked = ref*sky
 		mean,med,std = sigma_clipped_stats(masked)# assume sources weight the mean above the bkg
@@ -641,25 +709,32 @@ class tessreduce():
 			if self.parallel:
 				bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 				if rerun_negative:
-					if self._use_error_image:
-						over_sub = (deepcopy(self.flux) - bkg_smth) < -self.eflux # -0.5
-					else:
-						over_sub = (deepcopy(self.flux) - bkg_smth) <  -0.5
-					over_sub = np.nansum(over_sub,axis=0) > 0
+					# if self._use_error_image:
+					# 	over_sub = (deepcopy(self.flux) - bkg_smth) < -self.eflux # -0.5
+					# else:
+					# 	over_sub = (deepcopy(self.flux) - bkg_smth) <  -0.5
+					sub = (deepcopy(self.flux) - bkg_smth)
+					s = np.std(sub,axis=0)
+					m,med,std = sigma_clipped_stats(s) 
+					resid_mask = (s > med+5*std)
 					#self._over_sub = over_sub
 					#print('overshape ',over_sub.shape)
 					#print('m ',m.shape)
-					strap_mask = (self.mask & 4) > 0
-					if len(strap_mask.shape) == 3:
-						strap_mask = strap_mask[0]
-					if strap_iso:
-						over_sub[strap_mask] = 0
+					
+					# strap_mask = (self.mask & 4) > 0
+					# if len(strap_mask.shape) == 3:
+					# 	strap_mask = strap_mask[0]
+					# if strap_iso:
+					# 	over_sub[strap_mask] = 0
 					if source_hunt | (len(self.mask.shape) == 3):
-						m[:,over_sub[:,:]] = 1
+						new_mask = deepcopy(sm)
+						new_mask[:,resid_mask[:,:]] = np.nan
 					else:
-						m[over_sub] = 1
-					self._bkgmask = m
-					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+						new_mask = deepcopy(resid_mask) * 1.0
+						new_mask[new_mask == 1] = np.nan
+						new_mask = abs(new_mask - 1)
+					self._bkgmask = new_mask
+					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*new_mask)
 
 
 
@@ -677,12 +752,31 @@ class tessreduce():
 			self._calc_qe()#,self.eflux)
 			self.bkg *= self.qe
 
+		self.bkg = _subtract_residual_surface(self.bkg, strip_units(self.flux), self._bkgmask)
+
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
-									  data_path=self._vector_path,n_jobs=self.num_cores) 
+									  data_path=self._vector_path,n_jobs=self.num_cores)
 		if smoother._df is not None:
 			smoothed = smoother.smooth().smoothed
 			self.bkg = smoothed
+
+		# Replace catalogue source pixels (bit 1) with data-driven sources from _bkgmask
+		bkgmask_arr = np.asarray(self._bkgmask)
+		if len(self.mask.shape) == 3:
+			# 3D mask (moving mask active): match per-frame if possible
+			if bkgmask_arr.ndim == 3:
+				new_sources = np.isnan(bkgmask_arr)
+			else:
+				new_sources = np.isnan(bkgmask_arr)[np.newaxis, :, :]
+		else:
+			# 2D mask: collapse any 3D bkgmask to a single spatial map
+			if bkgmask_arr.ndim == 3:
+				new_sources = np.any(np.isnan(bkgmask_arr), axis=0)
+			else:
+				new_sources = np.isnan(bkgmask_arr)
+		self.mask = (self.mask & ~1) | new_sources.astype(self.mask.dtype)
+
 		#self._bkg_temporal_smooth()
 		#self._bkg_adaptive_smooth()
 

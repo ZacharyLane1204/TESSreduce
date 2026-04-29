@@ -20,6 +20,7 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.ndimage import median_filter, percentile_filter, uniform_filter
+from scipy.signal import savgol_filter
 from joblib import Parallel, delayed
 
 
@@ -382,6 +383,106 @@ def adaptive_medfilt_3d(
     return result, windows, variability, windows_pre_smooth
 
 
+# ── Savitzky-Golay smoother ────────────────────────────────────────────────────
+
+def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorder=2, sigma_clip=5.0):
+    """Apply a Savitzky-Golay filter along the time axis of a (T, X, Y) cube.
+
+    Smoothing is applied independently per segment (gaps are not crossed).
+    Per-pixel temporal outliers are sigma-clipped and interpolated over before
+    filtering, preventing transient signals (e.g. asteroids) from biasing the
+    smooth background estimate. NaNs are handled the same way.
+
+    Parameters
+    ----------
+    data : array (T, X, Y)
+    time : array (T,), optional
+    gap_thresh : float
+    window_length : int
+        Must be odd; reduced automatically if shorter than a segment.
+    polyorder : int
+    sigma_clip : float
+        Per-pixel frames more than sigma_clip * MAD above the median are
+        replaced by interpolation before smoothing. Set to None to disable.
+
+    Returns
+    -------
+    smoothed : array (T, X, Y)
+    """
+    data = np.asarray(data, dtype=np.float32)
+    T, X, Y = data.shape
+
+    if time is None:
+        time = np.arange(T, dtype=float)
+    time = np.asarray(time, dtype=float)
+
+    segments = _get_segments(time, gap_thresh)
+
+    nan_mask = ~np.isfinite(data)
+    data_filled = data.copy()
+
+    if nan_mask.any():
+        flat = data_filled.reshape(T, -1)
+        for s, e in segments:
+            t_seg = time[s:e]
+            seg_flat = flat[s:e]
+            bad = ~np.isfinite(seg_flat)
+            if not bad.any():
+                continue
+            all_bad = bad.all(axis=0)
+            seg_flat[:, all_bad] = 0.0
+            for j in np.where(bad.any(axis=0) & ~all_bad)[0]:
+                ts = seg_flat[:, j]
+                m = np.isfinite(ts)
+                seg_flat[:, j] = np.interp(t_seg, t_seg[m], ts[m])
+
+    wl = window_length if window_length % 2 == 1 else window_length + 1
+
+    def _apply_savgol(arr):
+        out = arr.copy()
+        for s, e in segments:
+            n = e - s
+            w = wl
+            while w >= n:
+                w -= 2
+            if w < polyorder + 1:
+                continue
+            out[s:e] = savgol_filter(arr[s:e], window_length=w, polyorder=polyorder, axis=0)
+        return out
+
+    # First pass
+    first_pass = _apply_savgol(data_filled)
+
+    # Identify outliers from first-pass residuals and interpolate over them
+    if sigma_clip is not None:
+        resid = data_filled - first_pass
+        resid_flat = resid.reshape(T, -1)
+        mad = np.nanmedian(np.abs(resid_flat - np.nanmedian(resid_flat, axis=0)), axis=0)
+        robust_std = 1.4826 * mad
+        outlier = resid_flat > sigma_clip * robust_std
+        data_filled2 = data_filled.copy().reshape(T, -1)
+        data_filled2[outlier] = np.nan
+        for s, e in segments:
+            t_seg = time[s:e]
+            seg_flat = data_filled2[s:e]
+            bad = ~np.isfinite(seg_flat)
+            if not bad.any():
+                continue
+            all_bad = bad.all(axis=0)
+            seg_flat[:, all_bad] = 0.0
+            for j in np.where(bad.any(axis=0) & ~all_bad)[0]:
+                ts = seg_flat[:, j]
+                m = np.isfinite(ts)
+                seg_flat[:, j] = np.interp(t_seg, t_seg[m], ts[m])
+        data_filled2 = data_filled2.reshape(T, X, Y)
+        result = _apply_savgol(data_filled2)
+    else:
+        result = first_pass
+
+    result[nan_mask] = np.nan
+    return result
+
+
 # ── Main class ─────────────────────────────────────────────────────────────────
 
 class AdaptiveBackground:
@@ -442,6 +543,9 @@ class AdaptiveBackground:
 
     def smooth(
         self,
+        method='savgol',
+        savgol_window=31,
+        savgol_polyorder=2,
         gap_thresh=3.0,
         w_min=3,
         w_max=51,
@@ -461,39 +565,61 @@ class AdaptiveBackground:
         scatter_angle_thresh=50.0,
         block_size=None,
     ):
-        """Run the adaptive smoothing and store results on the instance.
+        """Run background smoothing and store results on the instance.
 
-        Parameters mirror :func:`adaptive_medfilt_3d`. Returns ``self`` for
-        method chaining.
+        Parameters
+        ----------
+        method : {'savgol', 'adaptive'}
+            Smoothing method. ``'savgol'`` applies a Savitzky-Golay filter;
+            ``'adaptive'`` uses the adaptive median filter.
+        savgol_window : int
+            Window length for the Savitzky-Golay filter (must be odd).
+        savgol_polyorder : int
+            Polynomial order for the Savitzky-Golay filter.
+
+        All remaining parameters are passed to :func:`adaptive_medfilt_3d`
+        when ``method='adaptive'``. Returns ``self`` for method chaining.
         """
-        if n_jobs is None:
-            n_jobs = self.n_jobs
-        if block_size is None:
-            block_size = self.block_size
-        self.smoothed, self.windows, self.variability, self._windows_pre_smooth = (
-            adaptive_medfilt_3d(
+        if method == 'savgol':
+            self.smoothed = savgol_smooth_3d(
                 self.data,
                 time=self.time,
                 gap_thresh=gap_thresh,
-                w_min=w_min,
-                w_max=w_max,
-                grad_smooth_window=grad_smooth_window,
-                low_pct=low_pct,
-                high_pct=high_pct,
-                per_pixel_norm=per_pixel_norm,
-                n_levels=n_levels,
-                n_jobs=n_jobs,
-                metric=metric,
-                coarse_windows=coarse_windows,
-                combined_weight=combined_weight,
-                local_std_window=local_std_window,
-                local_norm_window=local_norm_window,
-                brightness_sigma=brightness_sigma,
-                window_smooth_size=window_smooth_size,
-                earth_angle=self.earth_angle,
-                moon_angle=self.moon_angle,
-                scatter_angle_thresh=scatter_angle_thresh,
-                block_size=block_size,
+                window_length=savgol_window,
+                polyorder=savgol_polyorder,
             )
-        )
+            self.windows = None
+            self.variability = None
+            self._windows_pre_smooth = None
+        else:
+            if n_jobs is None:
+                n_jobs = self.n_jobs
+            if block_size is None:
+                block_size = self.block_size
+            self.smoothed, self.windows, self.variability, self._windows_pre_smooth = (
+                adaptive_medfilt_3d(
+                    self.data,
+                    time=self.time,
+                    gap_thresh=gap_thresh,
+                    w_min=w_min,
+                    w_max=w_max,
+                    grad_smooth_window=grad_smooth_window,
+                    low_pct=low_pct,
+                    high_pct=high_pct,
+                    per_pixel_norm=per_pixel_norm,
+                    n_levels=n_levels,
+                    n_jobs=n_jobs,
+                    metric=metric,
+                    coarse_windows=coarse_windows,
+                    combined_weight=combined_weight,
+                    local_std_window=local_std_window,
+                    local_norm_window=local_norm_window,
+                    brightness_sigma=brightness_sigma,
+                    window_smooth_size=window_smooth_size,
+                    earth_angle=self.earth_angle,
+                    moon_angle=self.moon_angle,
+                    scatter_angle_thresh=scatter_angle_thresh,
+                    block_size=block_size,
+                )
+            )
         return self
