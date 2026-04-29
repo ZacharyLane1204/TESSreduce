@@ -14,6 +14,8 @@ from scipy.ndimage import shift
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import convolve
 from scipy.ndimage import label
+from scipy.ndimage import binary_dilation
+from joblib import Parallel, delayed
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 from scipy.interpolate import griddata
@@ -212,10 +214,10 @@ def Smooth_bkg(data, gauss_smooth=2, interpolate=False, extrapolate=True):
 					estimate[np.isnan(estimate)] = nearest[np.isnan(estimate)]
 				
 				estimate = gaussian_filter(estimate,gauss_smooth)
-			
+
 			#estimate = median_filter(estimate,5)
 			else:
-				# try inpaint stuff 
+				# try inpaint stuff
 				mask = deepcopy(arr.mask)
 				mask = mask.astype(bool)
 				# end inpaint
@@ -1359,6 +1361,128 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 			return np.array([np.nan]), np.array([np.nan]), pos, pos
 		else:
 			return np.array([np.nan]), np.array([np.nan])
-	
 
+
+def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
+							  box_size=16, dilate_r=2, gauss_sigma=2, n_jobs=-1):
+	"""
+	Fix anomalies (asteroids, cosmic rays) in a background cube.
+
+	Pipeline:
+	  Per frame (parallel):
+	    1. Subtract per-column additive excess on strap columns (bit 4).
+	    2. Fit a large-scale spatial trend with photutils Background2D.
+	    3. Flag pixels where |residual| > n_sigma * robust_sigma.
+	    4. Replace flagged (+ dilated) pixels with the trend value.
+	    5. Gaussian-smooth the result (strap excess held back).
+	  Then (if flux and bkgmask supplied):
+	    6. Fit and subtract a residual surface from (flux - bkg).
+	  Finally:
+	    7. Restore the strap column excess.
+
+	Parameters
+	----------
+	bkg : ndarray (T, NY, NX)
+	mask : ndarray (NY, NX) or (T, NY, NX), bitmask — bit 1 = source, bit 4 = strap
+	flux : ndarray (T, NY, NX), optional — raw flux cube for residual surface step
+	bkgmask : ndarray (NY, NX) or (T, NY, NX), optional — NaN-where-excluded mask
+	n_sigma : float
+	box_size : int
+	dilate_r : int
+	gauss_sigma : float
+	n_jobs : int  (passed to joblib; -1 = all cores)
+
+	Returns
+	-------
+	bkg_fixed : ndarray (T, NY, NX)
+	"""
+	from photutils.background import Background2D, MedianBackground
+
+	T, NY, NX = bkg.shape
+	mask2d   = mask[0] if mask.ndim == 3 else mask
+	strap    = (mask2d & 4).astype(bool)
+	src_mask = (mask2d & 1).astype(bool)
+	bg       = mask2d == 0
+	good_cols  = np.where(~strap.any(axis=0))[0]
+	strap_cols = np.where(strap.any(axis=0))[0]
+	has_straps = len(strap_cols) > 0 and len(good_cols) > 0
+	phot_mask  = strap | src_mask
+
+	# Scale box_size to the cutout — must fit at least 2 boxes per axis
+	eff_box = min(box_size, min(NY, NX) // 2)
+	eff_box = max(eff_box, 4)
+
+	yr, xr = np.ogrid[-dilate_r:dilate_r+1, -dilate_r:dilate_r+1]
+	disk   = xr**2 + yr**2 <= dilate_r**2
+
+	def _process(i):
+		frame = bkg[i].copy()
+		excess = np.zeros(len(strap_cols))
+
+		if has_straps:
+			interp = np.zeros((NY, len(strap_cols)))
+			for r in range(NY):
+				interp[r] = np.interp(strap_cols, good_cols, frame[r, good_cols])
+			excess = np.nanmedian(frame[:, strap_cols] - interp, axis=0)
+			frame[:, strap_cols] -= excess
+
+		try:
+			bkg2d = Background2D(frame, box_size=eff_box, filter_size=3,
+								 mask=phot_mask, bkg_estimator=MedianBackground(),
+								 exclude_percentile=50)
+			trend = bkg2d.background
+		except Exception:
+			trend = np.full_like(frame, np.nanmedian(frame))
+
+		resid    = frame - trend
+		resid_bg = resid[bg & ~strap]
+		if resid_bg.size == 0:
+			resid_bg = resid.ravel()
+		mad   = np.nanmedian(np.abs(resid_bg - np.nanmedian(resid_bg)))
+		sigma = 1.4826 * mad
+
+		flagged = np.abs(resid) > n_sigma * sigma
+		if flagged.any():
+			flagged = binary_dilation(flagged, structure=disk)
+			frame[flagged] = trend[flagged]
+
+		fixed = gaussian_filter(frame, sigma=gauss_sigma)
+		return fixed, excess
+
+	results   = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
+	bkg_fixed = np.array([r[0] for r in results])
+	excesses  = [r[1] for r in results]
+
+	if flux is not None and bkgmask is not None:
+		from astropy.stats import SigmaClip
+		sc = SigmaClip(sigma=3.0, maxiters=5)
+		bkgmask_arr = np.asarray(bkgmask)
+		exclude_mask = np.any(np.isnan(bkgmask_arr), axis=0) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
+		res_box = min(20, min(NY, NX) // 2)
+		res_box = max(res_box, 4)
+
+		def _fit_residual(residual):
+			finite_vals = residual[~exclude_mask & np.isfinite(residual)]
+			med = np.nanmedian(finite_vals)
+			std = np.nanstd(finite_vals)
+			transient_mask = exclude_mask | (residual > med + 5 * std)
+			try:
+				b = Background2D(residual, box_size=res_box, filter_size=3,
+								 sigma_clip=sc, bkg_estimator=MedianBackground(),
+								 mask=transient_mask, fill_value=0.0)
+				return b.background
+			except Exception:
+				return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+
+		residuals   = flux - bkg_fixed
+		corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_residual)(residuals[i]) for i in range(T))
+		bkg_fixed  += np.array(corrections)
+
+	if has_straps:
+		for i, excess in enumerate(excesses):
+			# use view to avoid numpy advanced-indexing shape ambiguity
+			frame_view = bkg_fixed[i]
+			frame_view[:, strap_cols] += excess
+
+	return bkg_fixed
 

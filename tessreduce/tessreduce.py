@@ -752,7 +752,10 @@ class tessreduce():
 			self._calc_qe()#,self.eflux)
 			self.bkg *= self.qe
 
-		self.bkg = _subtract_residual_surface(self.bkg, strip_units(self.flux), self._bkgmask)
+		self.bkg = fix_background_anomalies(self.bkg, self.mask,
+											flux=strip_units(self.flux),
+											bkgmask=self._bkgmask,
+											n_jobs=self.num_cores)
 
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
@@ -1624,6 +1627,10 @@ class tessreduce():
 				psf_snap = 'brightest'
 
 			tar, tar_err = self.psf_photometry(x,y,diff=diff,snap=psf_snap,bkg_poly_order=bkg_poly_order)
+		elif phot_method == 'photutils':
+			if psf_snap is None:
+				psf_snap = 'brightest'
+			tar, tar_err = self.psf_photutils(xPix=x, yPix=y, snap=psf_snap)
 		nan_ind = np.where(np.nansum(self.flux,axis=(1,2))==0,True,False)
 		nan_ind[self.ref_ind] = False
 		tar[nan_ind] = np.nan
