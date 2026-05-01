@@ -173,7 +173,7 @@ def parallel_bkg3(data,mask):
 	estimate = inpaint.inpaint_biharmonic(data,mask)
 	return estimate
 
-def Smooth_bkg(data, gauss_smooth=2, interpolate=False, extrapolate=True):
+def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 	"""
 	Interpolate over the masked objects to derive a background estimate. 
 
@@ -1364,7 +1364,7 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 
 
 def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
-							  box_size=16, dilate_r=2, gauss_sigma=2, n_jobs=-1):
+							  box_size=16, dilate_r=2, gauss_smooth=2, n_jobs=-1):
 	"""
 	Fix anomalies (asteroids, cosmic rays) in a background cube.
 
@@ -1389,7 +1389,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 	n_sigma : float
 	box_size : int
 	dilate_r : int
-	gauss_sigma : float
+	gauss_smooth : float
 	n_jobs : int  (passed to joblib; -1 = all cores)
 
 	Returns
@@ -1434,19 +1434,22 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 		except Exception:
 			trend = np.full_like(frame, np.nanmedian(frame))
 
-		resid    = frame - trend
-		resid_bg = resid[bg & ~strap]
-		if resid_bg.size == 0:
-			resid_bg = resid.ravel()
-		mad   = np.nanmedian(np.abs(resid_bg - np.nanmedian(resid_bg)))
-		sigma = 1.4826 * mad
+		resid = frame - trend
+
+		valid_mask = bg & ~strap
+		rv = resid[valid_mask] if valid_mask.any() else resid.ravel()
+		gm = np.nanmedian(rv)
+		sigma = 1.4826 * np.nanmedian(np.abs(rv - gm))
 
 		flagged = np.abs(resid) > n_sigma * sigma
 		if flagged.any():
 			flagged = binary_dilation(flagged, structure=disk)
 			frame[flagged] = trend[flagged]
 
-		fixed = gaussian_filter(frame, sigma=gauss_sigma)
+		if gauss_smooth:
+			fixed = gaussian_filter(frame, sigma=gauss_smooth)
+		else:
+			fixed = frame
 		return fixed, excess
 
 	results   = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))

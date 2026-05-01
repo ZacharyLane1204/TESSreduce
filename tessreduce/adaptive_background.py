@@ -139,6 +139,7 @@ def adaptive_medfilt_3d(
     moon_angle=None,
     scatter_angle_thresh=50.0,
     block_size=1,
+    sigma_clip=5.0,
 ):
     """Adaptive median filter for a (T, X, Y) background cube.
 
@@ -379,6 +380,13 @@ def adaptive_medfilt_3d(
         for w, smoothed_w in Parallel(n_jobs=n_jobs)(delayed(_smooth_seg)(w) for w in seg_levels):
             result[s:e][seg_wins == w] = smoothed_w[seg_wins == w]
 
+    if sigma_clip is not None:
+        frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
+        typical = np.nanmedian(frame_resid)
+        mad_frame = np.nanmedian(np.abs(frame_resid - typical))
+        frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
+        result[frame_outlier] = data_filled[frame_outlier]
+
     result[nan_mask] = np.nan
     return result, windows, variability, windows_pre_smooth
 
@@ -459,7 +467,8 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
         resid_flat = resid.reshape(T, -1)
         mad = np.nanmedian(np.abs(resid_flat - np.nanmedian(resid_flat, axis=0)), axis=0)
         robust_std = 1.4826 * mad
-        outlier = resid_flat > sigma_clip * robust_std
+        # clip both positive and negative outliers
+        outlier = np.abs(resid_flat) > sigma_clip * robust_std
         data_filled2 = data_filled.copy().reshape(T, -1)
         data_filled2[outlier] = np.nan
         for s, e in segments:
@@ -478,6 +487,15 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
         result = _apply_savgol(data_filled2)
     else:
         result = first_pass
+
+    # Per-frame fallback: if the whole frame deviates significantly from the
+    # smooth (i.e. the smooth has smeared a sharp scattered-light transition),
+    # restore the original unsmoothed value for that frame.
+    frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
+    typical = np.nanmedian(frame_resid)
+    mad_frame = np.nanmedian(np.abs(frame_resid - typical))
+    frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
+    result[frame_outlier] = data_filled[frame_outlier]
 
     result[nan_mask] = np.nan
     return result
@@ -564,6 +582,7 @@ class AdaptiveBackground:
         window_smooth_size=1,
         scatter_angle_thresh=50.0,
         block_size=None,
+        sigma_clip=5.0,
     ):
         """Run background smoothing and store results on the instance.
 
@@ -620,6 +639,7 @@ class AdaptiveBackground:
                     moon_angle=self.moon_angle,
                     scatter_angle_thresh=scatter_angle_thresh,
                     block_size=block_size,
+                    sigma_clip=sigma_clip,
                 )
             )
         return self

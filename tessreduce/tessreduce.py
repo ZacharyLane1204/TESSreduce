@@ -129,12 +129,12 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 class tessreduce():
 
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
-				 reduce=True,align=True,diff=True,corr_correction=True,kernel_match=False,calibrate=True,sourcehunt=True,
+				 reduce=True,align=True,diff=True,corr_correction=False,kernel_match=False,calibrate=True,sourcehunt=True,
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=True,orbit_ref=False):
+				 smooth_motion=True,orbit_ref=False,bkg_gauss_sigma=2):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -212,6 +212,7 @@ class tessreduce():
 		self.diff = diff
 		self.kernel_match = kernel_match
 		self.orbit_ref = orbit_ref
+		self._bkg_gauss_sigma = bkg_gauss_sigma
 		self.imaging = imaging
 		self.parallel = parallel
 		self._col_offset = col_offset
@@ -606,9 +607,13 @@ class tessreduce():
 								col,row,
 								localdatadir=f'{self._prf_path}/Sectors4+')
 		else:
-			prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
-									col,row)
-		
+			try:
+				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+										col,row)
+			except Exception as e:
+				print(f'Warning: could not load PRF (network error?): {e}')
+				return np.ones((self.flux.shape[0], self.flux.shape[1], self.flux.shape[2]))
+
 		self.prf =  prf.locate(5,5,(11,11))
 
 		# Iterate through frames to find PRF like sources
@@ -662,7 +667,8 @@ class tessreduce():
 		new_qes[new_qes < 1.001] = 1 # set a limit of 1% adjustment
 		self.qe = new_qes
 
-	def background(self,gauss_smooth=2,calc_qe=True,strap_iso=True,source_hunt=False,interpolate=True,rerun_negative=False):
+	def background(self,gauss_smooth=None,calc_qe=True,strap_iso=True,source_hunt=False,
+					interpolate=True,rerun_negative=False,rerun_diff=False):
 		"""
 		Calculate the temporal and spatial variation in the background.
 
@@ -688,6 +694,30 @@ class tessreduce():
 			Spatially varying background for each frame.
 
 		"""
+		if gauss_smooth is None:
+			gauss_smooth = self._bkg_gauss_sigma
+		# b = np.nansum(self.flux,axis=(1,2))
+		# ind = (b < np.percentile(b,24))
+		# if calc_qe:
+		# 	m,med,s = sigma_clipped_stats((self.flux)[ind] - self.ref,axis=0)
+		# else:
+		# 	m,med,s = sigma_clipped_stats((self.flux)[ind],axis=0)
+		# m,med,std = sigma_clipped_stats(s)
+
+		# m = (s > med + 3*std ) * 1.
+		# if calc_qe:
+		# 	m = convolve(m,np.ones((5,5)))
+		# else:
+		# 	m = convolve(m,np.ones((3,3)))
+
+		# m[m>0] = np.nan
+		# m = abs(m-1)
+
+		# if strap_iso:
+		# 	strap_cols = (self.mask & 4) > 0
+		# 	if strap_cols.ndim == 3:
+		# 		strap_cols = strap_cols.any(axis=0)
+		# 	m[strap_cols] = np.nan
 
 		if strap_iso:
 			m = (self.mask == 0) * 1.
@@ -704,29 +734,40 @@ class tessreduce():
 
 		# Calculate the smooth background 
 		if (self.flux.shape[1] > 30) & (self.flux.shape[2] > 30):
-			flux = strip_units(self.flux) 
+			flux = deepcopy(strip_units(self.flux))
+			# if calc_qe:
+			# 	flux -= self.ref
 
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
-				bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+				bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				if rerun_negative:
-					# if self._use_error_image:
-					# 	over_sub = (deepcopy(self.flux) - bkg_smth) < -self.eflux # -0.5
-					# else:
-					# 	over_sub = (deepcopy(self.flux) - bkg_smth) <  -0.5
+					if self._use_error_image:
+						over_sub = (deepcopy(self.flux) - bkg_smth) < -self.eflux # -0.5
+					else:
+						over_sub = (deepcopy(self.flux) - bkg_smth) <  -0.5
+					over_sub = np.nansum(over_sub,axis=0) > 0
+					#self._over_sub = over_sub
+					#print('overshape ',over_sub.shape)
+					#print('m ',m.shape)
+					strap_mask = (self.mask & 4) > 0
+					if len(strap_mask.shape) == 3:
+						strap_mask = strap_mask[0]
+					if strap_iso:
+						over_sub[strap_mask] = 0
+					if source_hunt | (len(self.mask.shape) == 3):
+						m[:,over_sub[:,:]] = 1
+					else:
+						m[over_sub] = 1
+					self._bkgmask = m
+					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+
+
+				if rerun_diff:
 					sub = (deepcopy(self.flux) - bkg_smth)
 					s = np.std(sub,axis=0)
 					m,med,std = sigma_clipped_stats(s) 
 					resid_mask = (s > med+5*std)
-					#self._over_sub = over_sub
-					#print('overshape ',over_sub.shape)
-					#print('m ',m.shape)
-					
-					# strap_mask = (self.mask & 4) > 0
-					# if len(strap_mask.shape) == 3:
-					# 	strap_mask = strap_mask[0]
-					# if strap_iso:
-					# 	over_sub[strap_mask] = 0
 					if source_hunt | (len(self.mask.shape) == 3):
 						new_mask = deepcopy(sm)
 						new_mask[:,resid_mask[:,:]] = np.nan
@@ -735,13 +776,11 @@ class tessreduce():
 						new_mask[new_mask == 1] = np.nan
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
-					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*new_mask)
-
-
+					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 
 			else:
 				for i in range(flux.shape[0]):
-					bkg_smth[i] = Smooth_bkg((flux*m)[i],gauss_smooth,interpolate)
+					bkg_smth[i] = Smooth_bkg((flux*m)[i],0,interpolate)
 		else:
 			print('Small tpf, using percentile cut background')
 			self.small_background()
@@ -753,33 +792,36 @@ class tessreduce():
 			self._calc_qe()#,self.eflux)
 			self.bkg *= self.qe
 
+		# if calc_qe:
 		self.bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=strip_units(self.flux),
 											bkgmask=self._bkgmask,
+											gauss_smooth=gauss_smooth,
 											n_jobs=self.num_cores)
 
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores)
 		if smoother._df is not None:
-			smoothed = smoother.smooth().smoothed
+			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 
 		# Replace catalogue source pixels (bit 1) with data-driven sources from _bkgmask
-		bkgmask_arr = np.asarray(self._bkgmask)
-		if len(self.mask.shape) == 3:
-			# 3D mask (moving mask active): match per-frame if possible
-			if bkgmask_arr.ndim == 3:
-				new_sources = np.isnan(bkgmask_arr)
+		if not calc_qe:
+			bkgmask_arr = np.asarray(self._bkgmask)
+			if len(self.mask.shape) == 3:
+				# 3D mask (moving mask active): match per-frame if possible
+				if bkgmask_arr.ndim == 3:
+					new_sources = np.isnan(bkgmask_arr)
+				else:
+					new_sources = np.isnan(bkgmask_arr)[np.newaxis, :, :]
 			else:
-				new_sources = np.isnan(bkgmask_arr)[np.newaxis, :, :]
-		else:
-			# 2D mask: collapse any 3D bkgmask to a single spatial map
-			if bkgmask_arr.ndim == 3:
-				new_sources = np.any(np.isnan(bkgmask_arr), axis=0)
-			else:
-				new_sources = np.isnan(bkgmask_arr)
-		self.mask = (self.mask & ~1) | new_sources.astype(self.mask.dtype)
+				# 2D mask: collapse any 3D bkgmask to a single spatial map
+				if bkgmask_arr.ndim == 3:
+					new_sources = np.any(np.isnan(bkgmask_arr), axis=0)
+				else:
+					new_sources = np.isnan(bkgmask_arr)
+			self.mask = (self.mask & ~1) | new_sources.astype(self.mask.dtype)
 
 		#self._bkg_temporal_smooth()
 		#self._bkg_adaptive_smooth()
@@ -1171,7 +1213,7 @@ class tessreduce():
 			reference[reference <= 0] = np.nan
 			base = np.nanmin(reference)
 			# reference -= base
-			self.ref = reference
+			self.ref = reference 
 			self.ref_ind = ref_ind
 			# self.flux -= base
 
@@ -2592,8 +2634,10 @@ class tessreduce():
 				if self.verbose > 0:
 					print('background')
 				self.bkg_orig = deepcopy(self.bkg)
-				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,gauss_smooth=1,interpolate=False)
-				self._grad_bkg_clip()
+				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,
+								gauss_smooth=self._bkg_gauss_sigma,interpolate=False,
+								rerun_negative=False,rerun_diff=True)
+				# self._grad_bkg_clip()
 				self.flux -= self.bkg
 				
 				if self.corr_correction:

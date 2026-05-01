@@ -340,6 +340,10 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 	image = tpf.flux[10]
 	image = strip_units(image)
 
+	NY, NX = image.shape
+	gaia = gaia[(gaia['x'] >= -1.5) & (gaia['x'] <= NX - 1 + 1.5) &
+				(gaia['y'] >= -1.5) & (gaia['y'] <= NY - 1 + 1.5)]
+
 	sat = Big_sat(gaia,image,scale)
 	if ref is None:
 		mg  = gaia_auto_mask(gaia,image,scale)
