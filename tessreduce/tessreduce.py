@@ -105,15 +105,13 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 		std = np.nanstd(finite_vals)
 		transient_mask = exclude_mask | (residual > med + 5 * std)
 		try:
-			b = Background2D(
-				residual,
-				box_size=box_size,
-				filter_size=filter_size,
-				sigma_clip=sc,
-				bkg_estimator=estimator,
-				mask=transient_mask,
-				fill_value=0.0,
-			)
+			b = Background2D(residual,
+							box_size=box_size,
+							filter_size=filter_size,
+							sigma_clip=sc,
+							bkg_estimator=estimator,
+							mask=transient_mask,
+							fill_value=0.0)
 			return b.background
 		except Exception:
 			return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
@@ -305,7 +303,23 @@ class tessreduce():
 			self.size = self.tpf.flux.shape[1]
 			if self.tpf.sector is not None:
 				self.sector = self.tpf.sector
-			if self.sector is None:
+			if not self.sector:
+				# Try FITS header directly (tessellate files leave SECTOR blank)
+				try:
+					s = self.tpf.hdu[0].header.get('SECTOR')
+					if s:
+						self.sector = int(s)
+				except Exception:
+					pass
+			if not self.sector:
+				# Parse from filename: sector27_... or s0027...
+				import re
+				m = re.search(r'sector(\d+)', str(tpf), re.IGNORECASE)
+				if not m:
+					m = re.search(r's(\d{4})', str(tpf))
+				if m:
+					self.sector = int(m.group(1))
+			if not self.sector:
 				self.sector = 999
 
 		# Retrieve TPF
@@ -808,6 +822,11 @@ class tessreduce():
 
 		# Replace catalogue source pixels (bit 1) with data-driven sources from _bkgmask
 		if not calc_qe:
+			#final correction 
+			f = deepcopy(self.flux)
+			m, med, std = sigma_clipped_stats(f - self.bkg, axis=(1, 2))
+			self.bkg += med[:,np.newaxis,np.newaxis]
+
 			bkgmask_arr = np.asarray(self._bkgmask)
 			if len(self.mask.shape) == 3:
 				# 3D mask (moving mask active): match per-frame if possible
@@ -2378,8 +2397,8 @@ class tessreduce():
 
 		Updates self.flux in place and stores self.orbit_segments.
 		"""
-		sector = self.tpf.sector if self.tpf is not None else None
-		camera = self.tpf.camera if self.tpf is not None else None
+		sector = (self.tpf.sector if self.tpf is not None else None) or self.sector
+		camera = (self.tpf.camera if self.tpf is not None else None) or self.camera
 		flux, segments, orbit_refs = orbit_ref_subtract(
 			strip_units(self.flux), self.mjd,
 			sector=sector, camera=camera,
