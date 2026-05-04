@@ -71,7 +71,7 @@ def strip_units(data):
 	
 	if type(data) != np.ndarray:
 		data = data.value
-	return data
+	return deepcopy(data)
 
 def sigma_mask(data,sigma=3):
 	"""
@@ -1402,11 +1402,15 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 	T, NY, NX = bkg.shape
 	mask2d   = mask[0] if mask.ndim == 3 else mask
 	strap    = (mask2d & 4).astype(bool)
-	src_mask = (mask2d & 1).astype(bool)
 	good_cols  = np.where(~strap.any(axis=0))[0]
 	strap_cols = np.where(strap.any(axis=0))[0]
 	has_straps = len(strap_cols) > 0 and len(good_cols) > 0
-	phot_mask  = strap | src_mask
+	if bkgmask is not None:
+		bkgmask_arr = np.asarray(bkgmask)
+		data_src = np.isnan(bkgmask_arr[0]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
+		phot_mask = strap | data_src
+	else:
+		phot_mask = strap | (mask2d & 1).astype(bool)
 
 	# Scale box_size to the cutout — must fit at least 2 boxes per axis
 	eff_box = min(box_size, min(NY, NX) // 2)
@@ -1606,10 +1610,8 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 	"""
 	Subtract a per-orbit reference from each orbit's frames.
 
-	For each orbit the reference is the median stack of that orbit's frames.
-	The orbit with the lowest stddev reference is used as the primary; for all
-	other orbits a smoothed additive correction is derived from the difference
-	between their reference and the primary, then applied before subtracting.
+	For each orbit the reference is the median stack of that orbit's frames,
+	subtracted only from frames belonging to that orbit.
 
 	Parameters
 	----------
@@ -1623,33 +1625,19 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 	-------
 	result   : ndarray (T, NY, NX)
 	segments : ndarray (T,)
+	orbit_refs : dict
 	"""
-	from scipy.ndimage import gaussian_filter
-
 	segments = get_orbit_segments(times_mjd, sector=sector, camera=camera,
 								  vector_path=vector_path,
 								  gap_threshold=gap_threshold)
 	orbs = np.unique(segments)
 
 	orbit_refs = {s: np.nanmedian(flux[segments == s], axis=0) for s in orbs}
-	stds       = {s: np.nanstd(orbit_refs[s]) for s in orbs}
-	primary    = min(stds, key=stds.get)
-	ref_primary = orbit_refs[primary]
-
-	# Smooth sigma scales with image size — spans ~1/8 of the smaller axis
-	NY, NX    = flux.shape[1], flux.shape[2]
-	smooth_sigma = max(min(NY, NX) // 8, 5)
 
 	result = np.empty_like(flux)
 	for s in orbs:
 		mask = segments == s
-		if s == primary:
-			result[mask] = flux[mask] - ref_primary
-		else:
-			diff       = orbit_refs[s] - ref_primary
-			correction = gaussian_filter(diff, sigma=smooth_sigma)
-			matched    = ref_primary + correction
-			result[mask] = flux[mask] - matched
+		result[mask] = flux[mask] - orbit_refs[s]
 
 	return result, segments, orbit_refs
 

@@ -132,7 +132,7 @@ class tessreduce():
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=True,orbit_ref=False,bkg_gauss_sigma=2):
+				 smooth_motion=True,orbit_ref=False,bkg_gauss_sigma=2,create_lc=True):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -204,6 +204,7 @@ class tessreduce():
 		self.tpf = tpf
 
 		# Reduction Process Specific
+		self._create_lc = create_lc
 		self.align = align
 		self.calibrate = calibrate
 		self.corr_correction = corr_correction
@@ -781,7 +782,8 @@ class tessreduce():
 					sub = (deepcopy(self.flux) - bkg_smth)
 					s = np.std(sub,axis=0)
 					m,med,std = sigma_clipped_stats(s) 
-					resid_mask = (s > med+5*std)
+					resid_mask = (s > med+5*std) * 1.0
+					resid_mask = convolve(resid_mask,np.ones((2,2))) > 1
 					if source_hunt | (len(self.mask.shape) == 3):
 						new_mask = deepcopy(sm)
 						new_mask[:,resid_mask[:,:]] = np.nan
@@ -2399,10 +2401,9 @@ class tessreduce():
 		"""
 		sector = (self.tpf.sector if self.tpf is not None else None) or self.sector
 		camera = (self.tpf.camera if self.tpf is not None else None) or self.camera
-		flux, segments, orbit_refs = orbit_ref_subtract(
-			strip_units(self.flux), self.mjd,
-			sector=sector, camera=camera,
-			vector_path=self._vector_path)
+		flux, segments, orbit_refs = orbit_ref_subtract(deepcopy(self.flux), self.mjd,
+														sector=sector, camera=camera,
+														vector_path=self._vector_path)
 		self.flux = flux
 		self.orbit_segments = segments
 		self.orbit_refs = orbit_refs
@@ -2677,8 +2678,8 @@ class tessreduce():
 				print('field calibration')
 				self.field_calibrate()
 
-			
-			self.lc, self.sky = self.diff_lc(plot=self.plot,diff=self.diff,tar_ap=tar_ap,sky_in=sky_in,sky_out=sky_out)
+			if self._create_lc:
+				self.lc, self.sky = self.diff_lc(plot=self.plot,diff=self.diff,tar_ap=tar_ap,sky_in=sky_in,sky_out=sky_out)
 
 			if self.imaging:
 				# if self.verbose > 0:
