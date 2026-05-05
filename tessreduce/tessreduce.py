@@ -533,6 +533,7 @@ class tessreduce():
 				2 - saturated source
 				4 - strap mask
 				8 - bad pixel (not used)
+				8 - data-driven source (from residual background mask)
 
 		"""
 
@@ -737,7 +738,7 @@ class tessreduce():
 		if strap_iso:
 			m = (self.mask == 0) * 1.
 		else:
-			m = ((self.mask & 1 == 0) & (self.mask & 2 == 0) ) * 1.
+			m = ((self.mask & 1 == 0) & (self.mask & 2 == 0)) * 1.
 		m[m==0] = np.nan
 
 		# Find extra sources not found in catalogue mask
@@ -822,27 +823,25 @@ class tessreduce():
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 
-		# Replace catalogue source pixels (bit 1) with data-driven sources from _bkgmask
+		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if not calc_qe:
-			#final correction 
+			#final correction
 			f = deepcopy(self.flux)
 			m, med, std = sigma_clipped_stats(f - self.bkg, axis=(1, 2))
 			self.bkg += med[:,np.newaxis,np.newaxis]
 
 			bkgmask_arr = np.asarray(self._bkgmask)
 			if len(self.mask.shape) == 3:
-				# 3D mask (moving mask active): match per-frame if possible
 				if bkgmask_arr.ndim == 3:
 					new_sources = np.isnan(bkgmask_arr)
 				else:
 					new_sources = np.isnan(bkgmask_arr)[np.newaxis, :, :]
 			else:
-				# 2D mask: collapse any 3D bkgmask to a single spatial map
 				if bkgmask_arr.ndim == 3:
 					new_sources = np.any(np.isnan(bkgmask_arr), axis=0)
 				else:
 					new_sources = np.isnan(bkgmask_arr)
-			self.mask = (self.mask & ~1) | new_sources.astype(self.mask.dtype)
+			self.mask = self.mask | (new_sources.astype(self.mask.dtype) * 8)
 
 		#self._bkg_temporal_smooth()
 		#self._bkg_adaptive_smooth()
@@ -1086,7 +1085,7 @@ class tessreduce():
 			w_wide = max(n // 4, 5)
 			if w_wide % 2 == 0:
 				w_wide += 1
-			w_narrow = max(n // 16, 5)
+			w_narrow = max(n // 8, 5)
 			if w_narrow % 2 == 0:
 				w_narrow += 1
 
@@ -1793,7 +1792,7 @@ class tessreduce():
 		nonan1 = np.isfinite(d)
 		nonan2 = np.isfinite(d*ap)
 		plt.imshow(data[maxind],origin='lower',
-					vmin=np.nanpercentile(d,16),
+					vmin=np.nanpercentile(d,8),
 					vmax=np.nanpercentile(d[nonan2],80),
 					aspect='auto')
 		cbar = plt.colorbar()
@@ -2333,7 +2332,7 @@ class tessreduce():
 				if snap == 'brightest': # each cutout has position snapped to brightest frame fit position
 					prf, cutouts, ecutouts = self._psf_initialise(size,(xPix,yPix),ref=(not diff))	# gather base PRF and the array of cutouts data
 					bkg = self.bkg[:,int(yPix),int(xPix)]
-					#lowbkg = bkg < np.nanpercentile(bkg,16)
+					#lowbkg = bkg < np.nanpercentile(bkg,8)
 					#weight = np.abs(np.nansum(cutouts[:,int(yPix)-1:int(yPix)+2,int(xPix)-1:int(xPix)+2],axis=(1,2))) / bkg
 					weight = np.abs(np.nansum((cutouts / ecutouts)[:,int(yPix)-1:int(yPix)+2,int(xPix)-1:int(xPix)+2],axis=(1,2)))
 					weight[np.isnan(weight)] = 0
@@ -3353,7 +3352,7 @@ class tessreduce():
 		self.ebv = e[0]
 
 		gr = (dat.gmag - dat['rmag']).values
-		ind = (gr < 1) & (dat['imag'].values < 16)
+		ind = (gr < 1) & (dat['imag'].values < 8)
 		d = dat.iloc[ind]
 		
 		x,y = self.wcs.all_world2pix(d.RAJ2000.values,d.DEJ2000.values,0)
@@ -3396,7 +3395,7 @@ class tessreduce():
 			d = SM_to_TESS_mag(d,ebv=self.ebv)
 
 		
-		maglim = 16.5
+		maglim = 8.5
 		maglim_bright = 10 
 		dist = np.sqrt((x[:,np.newaxis] - x[np.newaxis,:])**2 + (y[:,np.newaxis] - y[np.newaxis,:])**2)
 		mag_diff = d['tmag'].values[:,np.newaxis] - d['tmag'].values[np.newaxis,:]
@@ -3647,7 +3646,7 @@ class tessreduce():
 			zp_e = self.zp_e
 
 		if flux_type.lower() == 'mjy':
-			flux_zp = 16.4
+			flux_zp = 8.4
 		elif flux_type.lower() == 'jy':
 			flux_zp = 8.9
 		elif (flux_type.lower() == 'erg') | (flux_type.lower() == 'cgs'):
@@ -3671,7 +3670,7 @@ class tessreduce():
 
 
 		if flux_type.lower() == 'mjy':
-			self.zp = self.zp * 0 + 16.4
+			self.zp = self.zp * 0 + 8.4
 			self.zp_e = 0
 			self.lc_units = 'mJy'
 		if flux_type.lower() == 'jy':
