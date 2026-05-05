@@ -393,7 +393,7 @@ def adaptive_medfilt_3d(
 
 # ── Savitzky-Golay smoother ────────────────────────────────────────────────────
 
-def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorder=2, sigma_clip=5.0):
+def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyorder=2, sigma_clip=5.0):
     """Apply a Savitzky-Golay filter along the time axis of a (T, X, Y) cube.
 
     Smoothing is applied independently per segment (gaps are not crossed).
@@ -406,8 +406,9 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
     data : array (T, X, Y)
     time : array (T,), optional
     gap_thresh : float
-    window_length : int
+    window_length : int or None
         Must be odd; reduced automatically if shorter than a segment.
+        If None (default), computed from the cadence to span 6 hours.
     polyorder : int
     sigma_clip : float
         Per-pixel frames more than sigma_clip * MAD above the median are
@@ -444,6 +445,10 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
                 m = np.isfinite(ts)
                 seg_flat[:, j] = np.interp(t_seg, t_seg[m], ts[m])
 
+    if window_length is None:
+        cadence = float(np.median(np.diff(time))) if len(time) > 1 else 1.0
+        n_frames = max(3, int(round(0.25 / cadence)))  # 6 hours = 0.25 days
+        window_length = n_frames if n_frames % 2 == 1 else n_frames + 1
     wl = window_length if window_length % 2 == 1 else window_length + 1
 
     def _apply_savgol(arr):
@@ -562,7 +567,7 @@ class AdaptiveBackground:
     def smooth(
         self,
         method='savgol',
-        savgol_window=31,
+        savgol_window=None,
         savgol_polyorder=2,
         gap_thresh=3.0,
         w_min=3,
