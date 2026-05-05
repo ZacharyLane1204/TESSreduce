@@ -75,7 +75,10 @@ def Get_Catalogue(tpf, Catalog = 'gaia'):
 
 def _get_skymapper(coord,rad):
 	query = f'https://skymapper.anu.edu.au/sm-cone/public/query?RA={coord.ra.value}&DEC={coord.dec.value}&SR={np.round(rad.deg,3)}&RESPONSEFORMAT=CSV'
-	sm = pd.read_csv(query)
+	try:
+		sm = pd.read_csv(query)
+	except Exception:
+		return None
 	if len(sm) > 0:
 		keep = ['object_id','raj2000','dej2000','u_psf', 'e_u_psf',
 				'v_psf', 'e_v_psf','g_psf', 'e_g_psf','r_psf', 

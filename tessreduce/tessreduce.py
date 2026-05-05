@@ -3321,8 +3321,10 @@ class tessreduce():
 			if self.verbose > 0:
 				print('target is below -30 dec, calibrating to SkyMapper photometry.')
 			table = Get_Catalogue(self.tpf,Catalog='skymapper')
-			#table = Skymapper_df(table)
 			system = 'skymapper'
+			if table is None:
+				print('WARNING: SkyMapper unavailable, skipping field calibration.')
+				return
 		else:
 			if self.verbose > 0:
 				print('target is above -30 dec, calibrating to PS1 photometry.')
