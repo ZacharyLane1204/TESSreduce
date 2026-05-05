@@ -61,7 +61,7 @@ def _adaptive_params(shape: tuple[int, int]) -> dict:
     H, W = shape
     minsize = min(H, W)
     stamp_half = max(3, min(7, minsize // 6))
-    core_half    = 2 if stamp_half >= 3 else 0
+    core_half = 2 if stamp_half >= 3 else 0
     minarea = 3 if minsize < 80 else 5
     match_radius = max(2.0, min(3.0, minsize * 0.05))
     coarse_range = max(0.3, min(1.0, minsize * 0.03))
@@ -241,15 +241,15 @@ def _loss_spline_grid(spline, cores_ref, positions, weights,
     diff2 = (sci - ref_flat[None, :]) ** 2   # (G*G, P)
 
     # Accumulate weighted MSE per grid point, star by star
-    total  = np.zeros(G * G)
-    w_sum  = np.zeros(G * G)
+    total = np.zeros(G * G)
+    w_sum = np.zeros(G * G)
     offset = 0
     for k, sz in enumerate(star_sizes):
-        sl  = slice(offset, offset + sz)
-        d2  = diff2[:, sl]                              # (G*G, sz)
+        sl = slice(offset, offset + sz)
+        d2 = diff2[:, sl]                              # (G*G, sz)
         fin = np.all(np.isfinite(d2), axis=1)           # (G*G,)
-        total  += np.where(fin, weights[k] * d2.mean(axis=1), 0.0)
-        w_sum  += np.where(fin, weights[k],                    0.0)
+        total += np.where(fin, weights[k] * d2.mean(axis=1), 0.0)
+        w_sum += np.where(fin, weights[k], 0.0)
         offset += sz
 
     loss = np.where(w_sum > 0, total / np.maximum(w_sum, 1e-30), np.nan)
@@ -1194,9 +1194,9 @@ class SepAligner:
 
         sub_ref = self._sub_ref
         src_ref = self._src_ref
-        p       = self._params
+        p = self._params
         stamp_half = p['stamp_half']
-        core_half  = p['core_half']
+        core_half = p['core_half']
 
         # Re-run star selection on the reference against itself to get
         # accepted / rejected index sets (img == ref, so it's self-consistent)
@@ -1296,12 +1296,12 @@ class SepAligner:
         """
         import matplotlib.pyplot as plt
 
-        src   = self._src_ref
-        sub   = self._sub_ref
-        H, W  = sub.shape
-        p     = self._params
-        m     = self.edge_margin
-        N     = len(src)
+        src = self._src_ref
+        sub = self._sub_ref
+        H, W = sub.shape
+        p = self._params
+        m = self.edge_margin
+        N = len(src)
 
         if N == 0:
             print('SepAligner: no sources detected in reference — skipping quality plot.')
@@ -1314,10 +1314,10 @@ class SepAligner:
             (src['x'] >= m) & (src['x'] <= W - 1 - m) &
             (src['y'] >= m) & (src['y'] <= H - 1 - m))
 
-        ell       = 1.0 - src['b'] / np.clip(src['a'], 1e-9, None)
-        is_round  = ell < self.ell_max
+        ell = 1.0 - src['b'] / np.clip(src['a'], 1e-9, None)
+        is_round = ell < self.ell_max
 
-        is_unflagged  = src['flag'] == 0
+        is_unflagged = src['flag'] == 0
         is_unsaturated = src['peak'] < sat_level
 
         if self._pixel_mask is not None:
@@ -1341,16 +1341,16 @@ class SepAligner:
 
         # ── Plot ──────────────────────────────────────────────────────────
         fig = plt.figure(figsize=(1.5 * fig_width, 2 * fig_width))
-        gs  = fig.add_gridspec(2, 2, hspace=0.4, wspace=0.35)
-        ax_bar  = fig.add_subplot(gs[0, :])
+        gs = fig.add_gridspec(2, 2, hspace=0.4, wspace=0.35)
+        ax_bar = fig.add_subplot(gs[0, :])
         ax_scat = fig.add_subplot(gs[1, 0])
         ax_flag = fig.add_subplot(gs[1, 1])
 
         # Bar chart
-        labels   = list(conditions.keys())
-        n_pass   = [int(v.sum()) for v in conditions.values()]
-        n_fail   = [N - p for p in n_pass]
-        y        = np.arange(len(labels))
+        labels = list(conditions.keys())
+        n_pass = [int(v.sum()) for v in conditions.values()]
+        n_fail = [N - p for p in n_pass]
+        y = np.arange(len(labels))
         ax_bar.barh(y, n_pass, color='limegreen', label='Pass')
         ax_bar.barh(y, n_fail, left=n_pass, color='tomato', label='Fail')
         ax_bar.set_yticks(y)
@@ -1475,7 +1475,7 @@ class SepAligner:
         w_use = w_seg[usable]
 
         dt = t_seg[:, None] - t_use[None, :]          # (n, n_usable)
-        G  = np.exp(-0.5 * (dt / l_arr[:, None]) ** 2)
+        G = np.exp(-0.5 * (dt / l_arr[:, None]) ** 2)
         WG = w_use[None, :] * G                        # (n, n_usable)
         denom = WG.sum(axis=1)
 
@@ -1483,7 +1483,7 @@ class SepAligner:
         sm[valid] = (WG[valid] @ v_use) / denom[valid]
 
         if not valid.all():
-            t_q  = t_seg[~valid]
+            t_q = t_seg[~valid]
             near = np.argmin(np.abs(t_q[:, None] - t_use[None, :]), axis=1)
             sm[~valid] = v_use[near]
 

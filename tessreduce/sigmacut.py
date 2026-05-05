@@ -228,7 +228,7 @@ class calcaverageclass:
         else:
             self.mean_err = None
             self.mean = None
-            self.stdev_err  = None
+            self.stdev_err = None
             self.stdev = None
             self.Nskipped = 0
             return(1)

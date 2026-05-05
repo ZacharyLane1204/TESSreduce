@@ -75,9 +75,9 @@ class ground():
 
 
         """
-        self.ra  = ra
-        self.dec  = dec 
-        self.sn_name  = sn_name
+        self.ra = ra
+        self.dec = dec
+        self.sn_name = sn_name
         self.ztf_name = None
         # diags
         self.zp = -48.6

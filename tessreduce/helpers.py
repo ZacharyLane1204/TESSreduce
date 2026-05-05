@@ -1400,9 +1400,9 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 	from photutils.background import Background2D, MedianBackground
 
 	T, NY, NX = bkg.shape
-	mask2d   = mask[0] if mask.ndim == 3 else mask
-	strap    = (mask2d & 4).astype(bool)
-	good_cols  = np.where(~strap.any(axis=0))[0]
+	mask2d = mask[0] if mask.ndim == 3 else mask
+	strap = (mask2d & 4).astype(bool)
+	good_cols = np.where(~strap.any(axis=0))[0]
 	strap_cols = np.where(strap.any(axis=0))[0]
 	has_straps = len(strap_cols) > 0 and len(good_cols) > 0
 	if bkgmask is not None:
@@ -1417,7 +1417,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 	eff_box = max(eff_box, 4)
 
 	yr, xr = np.ogrid[-dilate_r:dilate_r+1, -dilate_r:dilate_r+1]
-	disk   = xr**2 + yr**2 <= dilate_r**2
+	disk = xr**2 + yr**2 <= dilate_r**2
 
 	def _process(i):
 		frame = bkg[i].copy()
@@ -1463,10 +1463,10 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 			# A genuine point-like anomaly (CR, asteroid) creates a sharp spike:
 			# large |∇²resid|.  A smooth background gradient produces a slowly-
 			# varying residual: small |∇²resid|.
-			lap      = laplace(resid)
-			lap_abs  = np.abs(lap)
-			lap_med  = np.nanmedian(lap_abs)
-			lap_mad  = np.nanmedian(np.abs(lap_abs - lap_med))
+			lap = laplace(resid)
+			lap_abs = np.abs(lap)
+			lap_med = np.nanmedian(lap_abs)
+			lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
 			lap_thresh = lap_med + 3 * 1.4826 * lap_mad
 			is_sharp = lap_abs > lap_thresh
 
@@ -1478,7 +1478,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 			edge_border[0, :] = True; edge_border[-1, :] = True
 			edge_border[:, 0] = True; edge_border[:, -1] = True
 			labeled, n_comp = label(flagged_coarse)
-			sharp_mask  = np.zeros((NY, NX), dtype=bool)
+			sharp_mask = np.zeros((NY, NX), dtype=bool)
 			smooth_mask = np.zeros((NY, NX), dtype=bool)
 			for comp_id in range(1, n_comp + 1):
 				comp = labeled == comp_id
@@ -1505,10 +1505,10 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 					trend_fine = bkg2d_fine.background
 				except Exception:
 					trend_fine = trend
-				resid_fine   = frame - trend_fine
-				sigma_fine   = _block_sigma(resid_fine, anom_box_fine)
+				resid_fine = frame - trend_fine
+				sigma_fine = _block_sigma(resid_fine, anom_box_fine)
 				flagged_fine = np.abs(resid_fine) > n_sigma * sigma_fine
-				confirmed    = smooth_mask & flagged_fine
+				confirmed = smooth_mask & flagged_fine
 				if confirmed.any():
 					dilated = binary_dilation(confirmed, structure=disk)
 					frame[dilated] = trend_fine[dilated]
@@ -1519,9 +1519,9 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 			fixed = frame
 		return fixed, excess
 
-	results   = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
+	results = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
 	bkg_fixed = np.array([r[0] for r in results])
-	excesses  = [r[1] for r in results]
+	excesses = [r[1] for r in results]
 
 	if flux is not None and bkgmask is not None:
 		from astropy.stats import SigmaClip
@@ -1544,9 +1544,9 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 			except Exception:
 				return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
 
-		residuals   = flux - bkg_fixed
+		residuals = flux - bkg_fixed
 		corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_residual)(residuals[i]) for i in range(T))
-		bkg_fixed  += np.array(corrections)
+		bkg_fixed += np.array(corrections)
 
 	if has_straps:
 		for i, excess in enumerate(excesses):
@@ -1573,7 +1573,7 @@ def get_orbit_segments(times_mjd, sector=None, camera=None, vector_path=None,
 
 	if sector is not None and camera is not None:
 		fname = f'TessVectors_S{sector:03d}_C{camera}_FFI.csv'
-		url   = ('https://heasarc.gsfc.nasa.gov/docs/tess/data/TESSVectors/'
+		url = ('https://heasarc.gsfc.nasa.gov/docs/tess/data/TESSVectors/'
 				 f'Vectors/FFI_Cadence/{fname}')
 		df = None
 		if vector_path is not None:
@@ -1591,14 +1591,17 @@ def get_orbit_segments(times_mjd, sector=None, camera=None, vector_path=None,
 
 		if df is not None:
 			times_btjd = times_mjd - 56999.5
-			vec_t   = df['MidTime'].values
-			vec_seg = df['Segment'].values
-			idx     = np.searchsorted(vec_t, times_btjd).clip(0, len(vec_t) - 1)
-			return vec_seg[idx].astype(int)
+			vec_t = df['MidTime'].values
+			orbits = np.zeros(len(times_btjd), dtype=int)
+			for segment in np.unique(df['Segment'].values):
+				ind = np.where(df['Segment'].values == segment)[0]
+				o = (vec_t[ind[0]] - 0.1 <= times_btjd) & (times_btjd <= vec_t[ind[-1]] + 0.1)
+				orbits[o] = segment
+			return orbits
 
 	# Fallback: split on large time gaps
-	diffs    = np.diff(times_mjd)
-	breaks   = np.where(diffs > gap_threshold)[0] + 1
+	diffs = np.diff(times_mjd)
+	breaks = np.where(diffs > gap_threshold)[0] + 1
 	segments = np.ones(len(times_mjd), dtype=int)
 	for k, b in enumerate(breaks, start=2):
 		segments[b:] = k

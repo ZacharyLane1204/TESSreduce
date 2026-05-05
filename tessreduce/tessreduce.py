@@ -493,14 +493,14 @@ class tessreduce():
 			m = 'Failure in TESScut api, not sure why.'
 			raise ValueError(m)
 		
-		self.tpf  = tpf
+		self.tpf = tpf
 		self.flux = strip_units(tpf.flux)  # Stripping astropy units so only numbers are returned
 		self.flux[np.isnan(self.flux)] = 0
 		if self._use_error_image:
 			self.eflux = strip_units(tpf.flux_err)
 		else:
 			self.eflux = None
-		self.wcs  = tpf.wcs
+		self.wcs = tpf.wcs
 		self.mjd = tpf.time.mjd
 
 	def make_mask(self,catalogue_path=None,maglim=19,scale=1,strapsize=6,useref=False):
@@ -1055,21 +1055,21 @@ class tessreduce():
 		if savename is None:
 			savename = self.savename
 
-		av_bkg     = np.nanmean(self.bkg, axis=(1, 2))
+		av_bkg = np.nanmean(self.bkg, axis=(1, 2))
 		av_bkg_raw = av_bkg.copy()
-		time       = deepcopy(self.mjd)
+		time = deepcopy(self.mjd)
 
 		_, med, std = sigma_clipped_stats(av_bkg)
-		ind       = av_bkg < med + clip_sigma * std
+		ind = av_bkg < med + clip_sigma * std
 		ind_where = np.where(ind)[0]
 
 		breaks = np.where(np.diff(time[ind]) > gap_thresh)[0] + 1
 		breaks = np.insert(breaks, 0, 0)
 		breaks = np.append(breaks, len(time[ind]))
 
-		new_bkg   = deepcopy(self.bkg)
+		new_bkg = deepcopy(self.bkg)
 		alpha_all = np.full(len(time), np.nan)
-		grad_all  = np.full(len(time), np.nan)
+		grad_all = np.full(len(time), np.nan)
 
 		for i in range(len(breaks) - 1):
 			seg_idx = ind_where[breaks[i]:breaks[i + 1]]
@@ -1094,11 +1094,11 @@ class tessreduce():
 			rw = max(min(n // 32, 51), 5)
 			if rw % 2 == 0:
 				rw += 1
-			av_rough    = savgol_filter(av, rw, 1)
-			grad        = np.abs(np.gradient(av_rough))
-			gw          = max(min(n // 32, 25), 3)
+			av_rough = savgol_filter(av, rw, 1)
+			grad = np.abs(np.gradient(av_rough))
+			gw = max(min(n // 32, 25), 3)
 			grad_smooth = np.convolve(grad, np.ones(gw) / gw, mode='same')
-			med_grad    = float(np.median(grad_smooth))
+			med_grad = float(np.median(grad_smooth))
 
 			# ── Blend weight: alpha=1 (wide) where gradient is low ───────
 			if med_grad < 1e-10:
@@ -1108,10 +1108,10 @@ class tessreduce():
 				alpha = np.clip(1.0 / np.maximum(rate_norm, 1.0), 0.0, 1.0)
 
 			alpha_all[seg_idx] = alpha
-			grad_all[seg_idx]  = grad_smooth
+			grad_all[seg_idx] = grad_smooth
 
 			# ── Pass 2: blend wide and narrow SavGol filters ─────────────
-			sav_wide   = savgol_filter(seg, w_wide,   1, axis=0)
+			sav_wide = savgol_filter(seg, w_wide, 1, axis=0)
 			sav_narrow = savgol_filter(seg, w_narrow, 1, axis=0)
 			a = alpha[:, np.newaxis, np.newaxis]
 			new_bkg[seg_idx] = a * sav_wide + (1.0 - a) * sav_narrow
@@ -1120,8 +1120,8 @@ class tessreduce():
 		# Use only source-free pixels so that star/galaxy flux does not
 		# bias the correction upward.
 		bkg_pixel_mask = ~(self.mask & 1).astype(bool)   # True = background
-		flux      = deepcopy(self.flux) - new_bkg         # (T, X, Y)
-		flux_bkg  = flux.copy().astype(float)
+		flux = deepcopy(self.flux) - new_bkg         # (T, X, Y)
+		flux_bkg = flux.copy().astype(float)
 		flux_bkg[:, ~bkg_pixel_mask] = np.nan
 		med = np.nanmedian(flux_bkg, axis=(1, 2))
 		new_bkg += med[:, np.newaxis, np.newaxis]
@@ -1703,18 +1703,18 @@ class tessreduce():
 		# ── Orbit ref flux correction ──────────────────────────────────────────
 		if self.orbit_ref and hasattr(self, 'orbit_refs') and hasattr(self, 'orbit_segments'):
 			orb_flux = {}
-			orb_err  = {}
+			orb_err = {}
 			for seg, ref_im in self.orbit_refs.items():
 				f = np.nansum(ref_im * ap_tar) - np.nanmedian(ref_im * ap_sky) * tar_ap**2
 				sky_vals = ref_im * ap_sky
 				e = np.nanstd(sky_vals[np.isfinite(sky_vals)]) * tar_ap**2
 				orb_flux[seg] = f
-				orb_err[seg]  = e
+				orb_err[seg] = e
 
 			# primary = orbit whose ref has lowest stddev
 			primary_seg = min(self.orbit_refs, key=lambda s: np.nanstd(self.orbit_refs[s]))
-			f_primary   = orb_flux[primary_seg]
-			e_primary   = orb_err[primary_seg]
+			f_primary = orb_flux[primary_seg]
+			e_primary = orb_err[primary_seg]
 
 			for seg in self.orbit_refs:
 				if seg == primary_seg:

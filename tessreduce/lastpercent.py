@@ -112,7 +112,7 @@ def _correct_pixel_correlation(flux, bkg, bright_pct=70, max_coeff=0.1):
 
     # Validate: only keep if |r| on bright frames actually decreases
     r_before = abs(pearsonr(f[bright], b[bright])[0])
-    r_after  = abs(pearsonr(corrected[nn][bright], b[bright])[0])
+    r_after = abs(pearsonr(corrected[nn][bright], b[bright])[0])
     if r_after >= r_before:
         return flux.copy()
 
@@ -151,7 +151,7 @@ def multi_correlation_cor(tess, limit=0.8, cores=7):
     y, x = np.where((cors > limit) & src_pix)
 
     flux = deepcopy(tess.flux)
-    bkg  = deepcopy(tess.bkg)
+    bkg = deepcopy(tess.bkg)
 
     if len(y) == 0:
         return flux, bkg

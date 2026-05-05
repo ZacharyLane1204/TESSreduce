@@ -160,17 +160,17 @@ def Big_sat(table,Image,scale=1):
         mag = m[i]
         mask = np.zeros_like(image,dtype=float)
         if (mag <= 7) & (mag > 5):
-            body   = int(13 * scale)
+            body = int(13 * scale)
             length = int(20 * scale)
-            width  = int(3 * scale)
+            width = int(3 * scale)
         if (mag <= 5) & (mag > 4):
-            body   = 15 * scale
+            body = 15 * scale
             length = int(60 * scale)
-            width  = int(5 * scale)
+            width = int(5 * scale)
         if (mag <= 4):# & (mag > 4):
-            body   = int(22 * scale)
+            body = int(22 * scale)
             length = int(115 * scale)
-            width  = int(7 * scale)
+            width = int(7 * scale)
         body = int(body) # no idea why this is needed, but it apparently is.
         kernel = np.zeros((body*2+1,body*2+1))
         yy,xx = np.where(kernel == 0)
@@ -237,9 +237,9 @@ def detect_straps_empirical(flux_cube, size=4, min_snr=3.0):
     n = max(int(T * 0.2), 5)
     order = np.argsort(av)
     quiet_idx = order[:n]
-    peak_idx  = order[-n:]
+    peak_idx = order[-n:]
 
-    prof_peak  = np.nanmedian(flux_cube[peak_idx],  axis=(0, 1))   # (Y,)
+    prof_peak = np.nanmedian(flux_cube[peak_idx], axis=(0, 1))   # (Y,)
     prof_quiet = np.nanmedian(flux_cube[quiet_idx], axis=(0, 1))   # (Y,)
 
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -329,13 +329,13 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 	"""
 
 	if catalogue_path is not None:
-		gaia  = external_load_cat(catalogue_path,maglim)
+		gaia = external_load_cat(catalogue_path,maglim)
 		coords = tpf.wcs.all_world2pix(gaia['ra'],gaia['dec'], 0)
 		gaia['x'] = coords[0]
 		gaia['y'] = coords[1]
 	else:
 		gp,gm = Get_Gaia(tpf,magnitude_limit=maglim)
-		gaia  = pd.DataFrame(np.array([gp[:,0],gp[:,1],gm]).T,columns=['x','y','mag'])
+		gaia = pd.DataFrame(np.array([gp[:,0],gp[:,1],gm]).T,columns=['x','y','mag'])
 
 	image = tpf.flux[10]
 	image = strip_units(image)
@@ -346,7 +346,7 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 
 	sat = Big_sat(gaia,image,scale)
 	if ref is None:
-		mg  = gaia_auto_mask(gaia,image,scale)
+		mg = gaia_auto_mask(gaia,image,scale)
 		mask = (mg['all'] > 0).astype(int) * 1 # assign 1 bit
 	else:
 		mg = np.zeros_like(ref,dtype=int)

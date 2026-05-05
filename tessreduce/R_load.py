@@ -45,7 +45,7 @@ def R_val(band,g=None,r=None,gr=None,ext=0,system='ps1'):
 		gr = g-r
 
 	if (gr is None) | np.isnan(gr).all():
-		Rb   = R[band]['coeff'][1]
+		Rb = R[band]['coeff'][1]
 	else:
 		Rr0 = R[band]['coeff'][1]
 		Rg0 = R[band]['coeff'][1]
@@ -53,7 +53,7 @@ def R_val(band,g=None,r=None,gr=None,ext=0,system='ps1'):
 		gr_int = gr - ext*(Rg0 - Rr0)
 
 		vals = R[band]['coeff']
-		Rb  = line(gr_int,vals[0],vals[1])
+		Rb = line(gr_int,vals[0],vals[1])
 	Rb_e = R[band]['std']
 
 	return Rb, Rb_e
