@@ -1370,7 +1370,8 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2,
 							  sep_thresh=3.0, sep_snr_thresh=2.0, sep_validate=True,
 							  high_bkg_frames=None, high_bkg_thresh=200.0,
-							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1):
+							  bad_bkg_sigma=10.0, bad_bkg_min_area=100,
+						  blend_gauss_std=1.0, n_jobs=-1):
 	"""
 	Fix anomalies (asteroids, cosmic rays) in a background cube.
 
@@ -1434,9 +1435,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 	yr, xr = np.ogrid[-dilate_r:dilate_r+1, -dilate_r:dilate_r+1]
 	disk = xr**2 + yr**2 <= dilate_r**2
 	yy, xx = np.mgrid[:NY, :NX]
-	_gauss_kernel_blend = Gaussian2DKernel(1.0)
-
-	def _process(i):
+	def _process(i, kernel):
 		frame = bkg[i].copy()
 		excess = np.zeros(len(strap_cols))
 
@@ -1579,7 +1578,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 				w[w_med > 0.5] = 0
 				if diff_mask.any():
 					w[diff_mask] = np.nan
-					w = interpolate_replace_nans(w, _gauss_kernel_blend)
+					w = interpolate_replace_nans(w, kernel)
 			w[sharp_mask] = 0.0
 			frame = (1 - w) * frame + w * prev_frame
 
@@ -1606,7 +1605,8 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 
 		return fixed, excess, sharp_mask, bad_bkg_mask
 
-	results = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
+	_kernel = Gaussian2DKernel(blend_gauss_std)
+	results = Parallel(n_jobs=n_jobs)(delayed(_process)(i, _kernel) for i in range(T))
 	bkg_fixed = np.array([r[0] for r in results])
 	excesses = [r[1] for r in results]
 	sharp_masks = np.array([r[2] for r in results])
