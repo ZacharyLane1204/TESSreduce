@@ -1367,7 +1367,7 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 
 
 def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, n_sigma=5.0,
-							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=4,
+							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2,
 							  sep_thresh=3.0, sep_snr_thresh=2.0, sep_validate=True,
 							  high_bkg_frames=None, high_bkg_thresh=200.0,
 							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1):

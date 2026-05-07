@@ -819,9 +819,9 @@ class tessreduce():
 		_bkg_median = np.array([np.nanmedian(self.bkg[i]) for i in range(len(self.bkg))])
 		if _df is not None:
 			_earth_angle, _moon_angle = _interpolate_angles(self.mjd, _df)
-			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 200.0)
+			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
 		else:
-			_high_bkg_frames = _bkg_median > 200.0
+			_high_bkg_frames = _bkg_median > 300.0
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=strip_units(self.flux),
 											bkg_prev=bkg_pre_fix if blend_dynamic else None,
