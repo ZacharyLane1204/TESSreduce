@@ -1420,13 +1420,8 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 	good_cols = np.where(~strap.any(axis=0))[0]
 	strap_cols = np.where(strap.any(axis=0))[0]
 	has_straps = len(strap_cols) > 0 and len(good_cols) > 0
-	if bkgmask is not None:
-		bkgmask_arr = np.asarray(bkgmask)
-		data_src = np.isnan(bkgmask_arr[0]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
-		phot_mask = strap | data_src
-	else:
-		phot_mask = strap | (mask2d & 1).astype(bool)
-		data_src = np.zeros((NY, NX), dtype=bool)
+	bkgmask_arr = np.asarray(bkgmask) if bkgmask is not None else None
+	src_mask_2d = (mask2d & 1).astype(bool)
 
 	# Scale box_size to the cutout — must fit at least 2 boxes per axis
 	eff_box = min(box_size, min(NY, NX) // 2)
@@ -1436,6 +1431,12 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 	disk = xr**2 + yr**2 <= dilate_r**2
 	yy, xx = np.mgrid[:NY, :NX]
 	def _process(i):
+		if bkgmask_arr is not None:
+			data_src = np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
+		else:
+			data_src = src_mask_2d
+		phot_mask = strap | data_src
+
 		frame = bkg[i].copy()
 		excess = np.zeros(len(strap_cols))
 
@@ -1592,12 +1593,13 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		if has_straps:
 			if flux is not None:
 				_, excess, _ = sigma_clipped_stats((flux[i] - fixed)[:, strap_cols], axis=0)
+				fixed[:, strap_cols] += excess
 			else:
 				interp = np.zeros((NY, len(strap_cols)))
 				for r in range(NY):
 					interp[r] = np.interp(strap_cols, good_cols, fixed[r, good_cols])
 				_, excess, _ = sigma_clipped_stats(fixed[:, strap_cols] - interp, axis=0)
-			fixed[:, strap_cols] -= excess
+			fixed[:, strap_cols] += excess
 
 		lap_abs = np.abs(laplace(fixed))
 		lap_med = np.nanmedian(lap_abs)
@@ -1621,12 +1623,10 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 	if flux is not None and bkgmask is not None:
 		from astropy.stats import SigmaClip
 		sc = SigmaClip(sigma=3.0, maxiters=5)
-		bkgmask_arr = np.asarray(bkgmask)
-		exclude_mask = np.any(np.isnan(bkgmask_arr), axis=0) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
 		res_box = min(20, min(NY, NX) // 2)
 		res_box = max(res_box, 4)
 
-		def _fit_residual(residual):
+		def _fit_residual(residual, exclude_mask):
 			finite_vals = residual[~exclude_mask & np.isfinite(residual)]
 			med = np.nanmedian(finite_vals)
 			std = np.nanstd(finite_vals)
@@ -1659,7 +1659,12 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 			return corr
 
 		residuals = flux - bkg_fixed
-		corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_residual)(residuals[i]) for i in range(T))
+		corrections = Parallel(n_jobs=n_jobs)(
+			delayed(_fit_residual)(
+				residuals[i],
+				np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
+			) for i in range(T)
+		)
 		bkg_fixed += np.array(corrections)
 
 	if has_straps:
