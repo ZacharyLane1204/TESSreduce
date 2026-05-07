@@ -132,7 +132,7 @@ class tessreduce():
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=2,create_lc=True):
+				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=4,create_lc=True):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -816,20 +816,19 @@ class tessreduce():
 		bkg_pre_fix = np.array(self.bkg)
 		from .adaptive_background import get_tessvectors, _interpolate_angles
 		_df = get_tessvectors(self.sector, self.tpf.camera, data_path=self._vector_path)
+		_bkg_median = np.array([np.nanmedian(self.bkg[i]) for i in range(len(self.bkg))])
 		if _df is not None:
 			_earth_angle, _moon_angle = _interpolate_angles(self.mjd, _df)
-			_high_bkg_frames = (_earth_angle < 70.0) | (_moon_angle < 50.0)
+			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 200.0)
 		else:
-			_high_bkg_frames = None
-		self.bkg, _sharp_masks = fix_background_anomalies(self.bkg, self.mask,
-											flux=deepcopy(self.flux),
+			_high_bkg_frames = _bkg_median > 200.0
+		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
+											flux=strip_units(self.flux),
+											bkg_prev=bkg_pre_fix if blend_dynamic else None,
 											bkgmask=self._bkgmask,
 											gauss_smooth=gauss_smooth,
 											high_bkg_frames=_high_bkg_frames,
 											n_jobs=self.num_cores)
-		if blend_dynamic:
-			self.bkg = blend_dynamic_background(self.bkg, bkg_pre_fix, flux,
-												sharp_masks=_sharp_masks)
 
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
