@@ -1440,10 +1440,13 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		excess = np.zeros(len(strap_cols))
 
 		if has_straps:
-			interp = np.zeros((NY, len(strap_cols)))
-			for r in range(NY):
-				interp[r] = np.interp(strap_cols, good_cols, frame[r, good_cols])
-			excess = np.nanmedian(frame[:, strap_cols] - interp, axis=0)
+			if flux is not None:
+				_, excess, _ = sigma_clipped_stats((flux[i] - frame)[:, strap_cols], axis=0)
+			else:
+				interp = np.zeros((NY, len(strap_cols)))
+				for r in range(NY):
+					interp[r] = np.interp(strap_cols, good_cols, frame[r, good_cols])
+				_, excess, _ = sigma_clipped_stats(frame[:, strap_cols] - interp, axis=0)
 			frame[:, strap_cols] -= excess
 
 		try:
@@ -1587,10 +1590,13 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		fixed = gaussian_filter(frame, sigma=smooth_sigma)
 
 		if has_straps:
-			interp = np.zeros((NY, len(strap_cols)))
-			for r in range(NY):
-				interp[r] = np.interp(strap_cols, good_cols, fixed[r, good_cols])
-			excess = np.nanmedian(fixed[:, strap_cols] - interp, axis=0)
+			if flux is not None:
+				_, excess, _ = sigma_clipped_stats((flux[i] - fixed)[:, strap_cols], axis=0)
+			else:
+				interp = np.zeros((NY, len(strap_cols)))
+				for r in range(NY):
+					interp[r] = np.interp(strap_cols, good_cols, fixed[r, good_cols])
+				_, excess, _ = sigma_clipped_stats(fixed[:, strap_cols] - interp, axis=0)
 			fixed[:, strap_cols] -= excess
 
 		lap_abs = np.abs(laplace(fixed))
