@@ -16,6 +16,8 @@ from scipy.ndimage import convolve
 from scipy.ndimage import label
 from scipy.ndimage import binary_dilation
 from scipy.ndimage import laplace
+from scipy.ndimage import median_filter
+from astropy.convolution import interpolate_replace_nans, Gaussian2DKernel
 from joblib import Parallel, delayed
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
@@ -1365,7 +1367,9 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 
 
 def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
-							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2, n_jobs=-1):
+							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2,
+							  sep_thresh=3.0, sep_snr_thresh=2.0, sep_validate=True,
+							  high_bkg_frames=None, high_bkg_thresh=200.0, n_jobs=-1):
 	"""
 	Fix anomalies (asteroids, cosmic rays) in a background cube.
 
@@ -1401,6 +1405,15 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 
 	T, NY, NX = bkg.shape
 	mask2d = mask[0] if mask.ndim == 3 else mask
+	if high_bkg_frames is None:
+		src_mask = ((mask2d & 1) == 0) & ((mask2d & 2) == 0)
+		ref = flux if flux is not None else bkg
+		masked_ref = ref * src_mask[np.newaxis].astype(float)
+		masked_ref[masked_ref == 0] = np.nan
+		frame_med = np.nanmedian(masked_ref, axis=(1, 2))
+		high_bkg_frames = frame_med > high_bkg_thresh
+	else:
+		high_bkg_frames = np.asarray(high_bkg_frames, dtype=bool)
 	strap = (mask2d & 4).astype(bool)
 	good_cols = np.where(~strap.any(axis=0))[0]
 	strap_cols = np.where(strap.any(axis=0))[0]
@@ -1411,6 +1424,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 		phot_mask = strap | data_src
 	else:
 		phot_mask = strap | (mask2d & 1).astype(bool)
+		data_src = np.zeros((NY, NX), dtype=bool)
 
 	# Scale box_size to the cutout — must fit at least 2 boxes per axis
 	eff_box = min(box_size, min(NY, NX) // 2)
@@ -1457,71 +1471,88 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 
 		sigma_coarse = _block_sigma(resid, anom_box)
 		flagged_coarse = np.abs(resid) > n_sigma * sigma_coarse
+		sharp_mask = np.zeros((NY, NX), dtype=bool)
 
-		if flagged_coarse.any():
-			# Classify flagged pixels using the Laplacian of the residual.
-			# A genuine point-like anomaly (CR, asteroid) creates a sharp spike:
-			# large |∇²resid|.  A smooth background gradient produces a slowly-
-			# varying residual: small |∇²resid|.
-			lap = laplace(resid)
-			lap_abs = np.abs(lap)
-			lap_med = np.nanmedian(lap_abs)
-			lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
-			lap_thresh = lap_med + 3 * 1.4826 * lap_mad
-			is_sharp = lap_abs > lap_thresh
+		# Build SEP source mask on |Laplacian(frame)|.
+		import sep as _sep
+		lap_abs = np.abs(laplace(frame)).astype(np.float64)
+		_bkg = _sep.Background(lap_abs)
+		lap_sub = lap_abs - _bkg.back()
+		lap_err = _bkg.rms()
+		snr_map = lap_sub / (lap_err + 1e-10)
+		try:
+			objects = _sep.extract(lap_sub, thresh=sep_thresh, err=lap_err)
+		except Exception:
+			objects = []
+		sep_mask = np.zeros((NY, NX), dtype=bool)
+		for obj in objects:
+			ap_mask = np.zeros((NY, NX), dtype=bool)
+			_sep.mask_ellipse(ap_mask, obj['x'], obj['y'], obj['a'], obj['b'], obj['theta'], r=3.0)
+			if ap_mask.sum() > 0 and snr_map[ap_mask].mean() > sep_snr_thresh:
+				sep_mask |= ap_mask
 
-			# Classify per connected component: if ANY pixel in a component has a
-			# large Laplacian (sharp), treat the whole component as sharp.
-			# This catches multi-pixel anomalies (asteroid tracks, broad CRs)
-			# whose interior pixels have small per-pixel Laplacian values.
+		lap_med = np.nanmedian(lap_abs)
+		lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
+		is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
+
+		# SEP-detected sources always sharp, regardless of the component loop.
+		sharp_mask |= sep_mask
+
+		if sep_validate:
 			edge_border = np.zeros((NY, NX), dtype=bool)
 			edge_border[0, :] = True; edge_border[-1, :] = True
 			edge_border[:, 0] = True; edge_border[:, -1] = True
 			labeled, n_comp = label(flagged_coarse)
-			sharp_mask = np.zeros((NY, NX), dtype=bool)
 			smooth_mask = np.zeros((NY, NX), dtype=bool)
 			for comp_id in range(1, n_comp + 1):
 				comp = labeled == comp_id
-				if (comp & edge_border).any():
-					smooth_mask |= comp   # edge-touching: force fine check
-				elif (comp & is_sharp).any():
-					sharp_mask |= comp    # any sharp pixel → whole component sharp
+				if (comp & edge_border).any() and not (comp & sep_mask).any():
+					smooth_mask |= comp
+				elif (comp & is_sharp).any() and (comp & sep_mask).any():
+					sharp_mask |= comp
 				else:
 					smooth_mask |= comp
+		else:
+			sharp_mask |= flagged_coarse & is_sharp
 
-			# Sharp anomalies: replace directly with coarse trend.
-			if sharp_mask.any():
-				dilated = binary_dilation(sharp_mask, structure=disk)
-				frame[dilated] = trend[dilated]
+		smooth_mask = flagged_coarse & ~sharp_mask
 
-			# Smooth anomalies: likely a background gradient — re-check with a
-			# finer Background2D that follows the gradient more closely.
-			if smooth_mask.any():
-				eff_fine = max(min(anom_box_fine, min(NY, NX) // 2), 4)
-				try:
-					bkg2d_fine = Background2D(frame, box_size=eff_fine, filter_size=3,
-											 mask=phot_mask, bkg_estimator=MedianBackground(),
-											 exclude_percentile=50)
-					trend_fine = bkg2d_fine.background
-				except Exception:
-					trend_fine = trend
-				resid_fine = frame - trend_fine
-				sigma_fine = _block_sigma(resid_fine, anom_box_fine)
-				flagged_fine = np.abs(resid_fine) > n_sigma * sigma_fine
-				confirmed = smooth_mask & flagged_fine
-				if confirmed.any():
-					dilated = binary_dilation(confirmed, structure=disk)
-					frame[dilated] = trend_fine[dilated]
+		# Fit fine Background2D excluding sharp anomaly pixels so they don't bias the surface.
+		any_anom = sharp_mask.any() or smooth_mask.any()
+		if any_anom:
+			eff_fine = max(min(anom_box_fine, min(NY, NX) // 2), 4)
+			try:
+				bkg2d_fine = Background2D(frame, box_size=eff_fine, filter_size=3,
+										 mask=phot_mask | sharp_mask, bkg_estimator=MedianBackground(),
+										 exclude_percentile=50)
+				trend_fine = bkg2d_fine.background
+			except Exception:
+				trend_fine = trend
+
+		# Sharp anomalies: replace with fine trend.
+		if sharp_mask.any():
+			frame[sharp_mask] = trend_fine[sharp_mask]
+
+		# Smooth anomalies: re-check against fine trend, replace if still flagged.
+		if smooth_mask.any():
+			resid_fine = frame - trend_fine
+			sigma_fine = _block_sigma(resid_fine, anom_box_fine)
+			flagged_fine = np.abs(resid_fine) > n_sigma * sigma_fine
+			confirmed = smooth_mask & flagged_fine
+			if confirmed.any():
+				dilated = binary_dilation(confirmed, structure=disk)
+				frame[dilated] = trend_fine[dilated]
 
 		if gauss_smooth:
 			fixed = gaussian_filter(frame, sigma=gauss_smooth)
 		else:
 			fixed = frame
-		return fixed, excess
+		return fixed, excess, sharp_mask
 
 	results = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
 	bkg_fixed = np.array([r[0] for r in results])
 	excesses = [r[1] for r in results]
+	sharp_masks = np.array([r[2] for r in results])  # (T, NY, NX) bool
 
 	if flux is not None and bkgmask is not None:
 		from astropy.stats import SigmaClip
@@ -1540,9 +1571,28 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 				b = Background2D(residual, box_size=res_box, filter_size=3,
 								 sigma_clip=sc, bkg_estimator=MedianBackground(),
 								 mask=transient_mask, fill_value=0.0)
-				return b.background
+				corr = b.background
 			except Exception:
-				return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+				corr = np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+
+			# Apply Laplacian sharp/smooth classification to the correction.
+			# Only suppress corrections in sharp (point-like) regions — smooth
+			# background gradients should be applied.
+			corr_resid = residual - corr
+			_, corr_med, corr_std = sigma_clipped_stats(corr_resid[~exclude_mask])
+			flagged = np.abs(corr_resid) > n_sigma * corr_std
+			if flagged.any():
+				lap_abs = np.abs(laplace(corr_resid))
+				lap_med = np.nanmedian(lap_abs)
+				lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
+				is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
+				labeled_c, n_c = label(flagged)
+				for cid in range(1, n_c + 1):
+					comp = labeled_c == cid
+					n_sp = (comp & is_sharp).sum()
+					if n_sp / comp.sum() >= 0.3:
+						corr[comp] = 0.0
+			return corr
 
 		residuals = flux - bkg_fixed
 		corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_residual)(residuals[i]) for i in range(T))
@@ -1554,7 +1604,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkgmask=None, n_sigma=5.0,
 			frame_view = bkg_fixed[i]
 			frame_view[:, strap_cols] += excess
 
-	return bkg_fixed
+	return bkg_fixed, sharp_masks
 
 
 def get_orbit_segments(times_mjd, sector=None, camera=None, vector_path=None,
@@ -1643,4 +1693,52 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 		result[mask] = flux[mask] - orbit_refs[s]
 
 	return result, segments, orbit_refs
+
+
+def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None):
+	"""Per-pixel blend bkg_new toward bkg_prev based on residual quality.
+
+	For each pixel, compares |flux - bkg_new| vs |flux - bkg_prev|. Where
+	bkg_new leaves a larger residual than bkg_prev it is blended back toward
+	bkg_prev. The blend is soft: the transition is scaled by the per-frame
+	typical residual so noise-level differences do not trigger blending.
+
+	Pixels in sharp_masks always use bkg_new (weight=0) — sharp anomaly
+	corrections are trusted unconditionally.
+
+	Parameters
+	----------
+	bkg_new : np.ndarray (T, NY, NX)
+	bkg_prev : np.ndarray (T, NY, NX)
+	flux : np.ndarray (T, NY, NX)
+	sigma : float
+	sharp_masks : np.ndarray (T, NY, NX) bool, optional
+
+	Returns
+	-------
+	np.ndarray (T, NY, NX)
+	"""
+	bkg_new = np.array(bkg_new)
+	flux = np.array(flux)
+	resid_new = np.abs(flux - bkg_new)
+	resid_prev = np.abs(flux - bkg_prev)
+	delta = resid_new - resid_prev  # positive = bkg_new is worse
+	_gauss_kernel = Gaussian2DKernel(2.0)
+
+	out = bkg_new.copy()
+	for i in range(bkg_new.shape[0]):
+		_, _, scale = sigma_clipped_stats(resid_prev[i])
+		w = np.clip(delta[i] / (sigma * scale + 1e-10), 0, 1)
+
+		w_zero = (w == 0)
+		w_med = median_filter(w_zero.astype(float), size=7)
+		diff_mask = w_zero & ~(w_med > 0.5)
+		w[w_med > 0.5] = 0
+		w[diff_mask] = np.nan
+		w = interpolate_replace_nans(w, _gauss_kernel)
+
+		if sharp_masks is not None:
+			w[sharp_masks[i]] = 0.0
+		out[i] = (1 - w) * bkg_new[i] + w * bkg_prev[i]
+	return out
 

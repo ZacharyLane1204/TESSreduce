@@ -684,7 +684,7 @@ class tessreduce():
 		self.qe = new_qes
 
 	def background(self,gauss_smooth=None,calc_qe=True,strap_iso=True,source_hunt=False,
-					interpolate=True,rerun_negative=False,rerun_diff=False):
+					interpolate=True,rerun_negative=False,rerun_diff=False,blend_dynamic=False):
 		"""
 		Calculate the temporal and spatial variation in the background.
 
@@ -782,7 +782,7 @@ class tessreduce():
 				if rerun_diff:
 					sub = (deepcopy(self.flux) - bkg_smth)
 					s = np.std(sub,axis=0)
-					m,med,std = sigma_clipped_stats(s) 
+					m,med,std = sigma_clipped_stats(s)
 					resid_mask = (s > med+5*std) * 1.0
 					resid_mask = convolve(resid_mask,np.ones((2,2))) > 1
 					if source_hunt | (len(self.mask.shape) == 3):
@@ -793,7 +793,10 @@ class tessreduce():
 						new_mask[new_mask == 1] = np.nan
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
+					bkg_s1 = np.array(bkg_smth)
 					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
+					if blend_dynamic:
+						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux)
 
 			else:
 				for i in range(flux.shape[0]):
@@ -810,11 +813,15 @@ class tessreduce():
 			self.bkg *= self.qe
 
 		# if calc_qe:
-		self.bkg = fix_background_anomalies(self.bkg, self.mask,
+		bkg_pre_fix = np.array(self.bkg)
+		self.bkg, _sharp_masks = fix_background_anomalies(self.bkg, self.mask,
 											flux=strip_units(self.flux),
 											bkgmask=self._bkgmask,
 											gauss_smooth=gauss_smooth,
 											n_jobs=self.num_cores)
+		if blend_dynamic:
+			self.bkg = blend_dynamic_background(self.bkg, bkg_pre_fix, flux,
+												sharp_masks=_sharp_masks)
 
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
