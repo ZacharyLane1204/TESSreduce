@@ -842,7 +842,9 @@ class tessreduce():
 		if not calc_qe:
 			#final correction
 			f = deepcopy(self.flux)
-			m, med, std = sigma_clipped_stats(f - self.bkg, axis=(1, 2))
+			# m, med, std = sigma_clipped_stats(f - self.bkg, axis=(1, 2))
+			_p = (f - self.bkg).reshape(len(self.bkg), -1)
+			med = np.median(_p, axis=1)
 			self.bkg += med[:,np.newaxis,np.newaxis]
 
 			bkgmask_arr = np.asarray(self._bkgmask)
@@ -1034,7 +1036,8 @@ class tessreduce():
 				new_bkg[seg_idx] = np.where(use_sav, sav, seg)
 
 		flux = deepcopy(self.flux) - new_bkg
-		med = sigma_clipped_stats(flux,axis=(1,2))[1]
+		# med = sigma_clipped_stats(flux,axis=(1,2))[1]
+		med = np.median(flux.reshape(len(flux), -1), axis=1)
 		new_bkg += med[:,np.newaxis,np.newaxis]
 		self.bkg = new_bkg
 
@@ -1255,8 +1258,13 @@ class tessreduce():
 	def stack_ref(self,time_restriction=None):
 		if time_restriction is None:
 			time_restriction = self._ref_time_window
-		m,med,std = sigma_clipped_stats(self.flux,axis=(1,2))
-		sm, smed, sstd = sigma_clipped_stats(std)
+		# m,med,std = sigma_clipped_stats(self.flux,axis=(1,2))
+		_p = self.flux.reshape(len(self.flux), -1)
+		med = np.median(_p, axis=1)
+		std = np.median(np.abs(_p - med[:, np.newaxis]), axis=1) * 1.4826
+		# sm, smed, sstd = sigma_clipped_stats(std)
+		smed = np.median(std)
+		sstd = np.median(np.abs(std - smed)) * 1.4826
 		ind = np.where((std < (smed + 3*sstd)) & (std > (smed - 3*sstd)))[0]
 		times = self.mjd[ind]
 		ref_time = self.mjd[self.ref_ind]
