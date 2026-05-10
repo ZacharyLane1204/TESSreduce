@@ -217,7 +217,8 @@ def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 				if extrapolate:
 					estimate[np.isnan(estimate)] = nearest[np.isnan(estimate)]
 				
-				estimate = gaussian_filter(estimate,gauss_smooth)
+				if gauss_smooth > 0:
+					estimate = gaussian_filter(estimate,gauss_smooth)
 
 			#estimate = median_filter(estimate,5)
 			else:
@@ -227,9 +228,10 @@ def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 				# end inpaint
 				estimate = inpaint.inpaint_biharmonic(data,mask)
 				#estimate = signal.fftconvolve(estimate,self.prf,mode='same')
-				if (np.nanmedian(estimate) < 150) & (np.nanstd(estimate) < 3): # magic numbers to define a well behaved background
-					gauss_smooth = gauss_smooth * 4
-				estimate = gaussian_filter(estimate,gauss_smooth)
+				if gauss_smooth > 0:
+					if (np.nanmedian(estimate) < 150) & (np.nanstd(estimate) < 3):
+						gauss_smooth = gauss_smooth * 4
+					estimate = gaussian_filter(estimate,gauss_smooth)
 		else:
 			estimate = np.zeros_like(data) * np.nan	
 	else:
