@@ -553,13 +553,14 @@ class tessreduce():
 		tmp[tmp==0] = 1e12 # random big number 
 		ref = data[np.argmin(tmp)] * sky
 
-		# Compute a spatial QE map from a single reference frame.
-		# Stored as self.qe_spatial for diagnostic use; the temporal QE
-		# correction applied during background() is computed separately by _calc_qe.
-		try:
-			self.qe_spatial = correct_straps(ref,mask,parallel=True)
-		except:
-			self.qe_spatial = correct_straps(ref,mask,parallel=False)
+		## Old code, no longer used 
+		## Compute a spatial QE map from a single reference frame.
+		## Stored as self.qe_spatial for diagnostic use; the temporal QE
+		## correction applied during background() is computed separately by _calc_qe.
+		# try:
+		# 	self.qe_spatial = correct_straps(ref,mask,parallel=True)
+		# except:
+		# 	self.qe_spatial = correct_straps(ref,mask,parallel=False)
 
 
 		c1 = data.shape[1] // 2
@@ -571,10 +572,10 @@ class tessreduce():
 		fullmask = mask | cmask
 		sky = ((fullmask & 1)+1 == 1) * 1.
 		sky[sky==0] = np.nan
-		masked = ref*sky
+		masked = np.abs(ref*sky)
 		mean,med,std = sigma_clipped_stats(masked)# assume sources weight the mean above the bkg
 		if useref is False:
-			m_second = (masked > mean+2*std).astype(int)
+			m_second = (masked - mean > 2*std).astype(int)
 			self.mask = fullmask | m_second
 		else:
 			self.mask = fullmask
