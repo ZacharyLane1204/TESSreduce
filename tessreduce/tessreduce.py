@@ -132,7 +132,7 @@ class tessreduce():
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=4,create_lc=True):
+				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=4,create_lc=True,center_mask=True):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -212,6 +212,7 @@ class tessreduce():
 		self.kernel_match = kernel_match
 		self.orbit_ref = orbit_ref
 		self._bkg_gauss_sigma = bkg_gauss_sigma
+		self._center_mask = center_mask
 		self.imaging = imaging
 		self.parallel = parallel
 		self._col_offset = col_offset
@@ -564,9 +565,8 @@ class tessreduce():
 		c1 = data.shape[1] // 2
 		c2 = data.shape[2] // 2
 		cmask = np.zeros_like(data[0],dtype=int)
-		cmask[c1,c2] = 1
-		kern = np.ones((3,3))
-		cmask = convolve(cmask,kern)
+		if self._center_mask:
+			cmask[c1-1:c1+2, c2-1:c2+2] = 1
 
 		fullmask = mask | cmask
 		sky = ((fullmask & 1)+1 == 1) * 1.
@@ -823,7 +823,7 @@ class tessreduce():
 		else:
 			_high_bkg_frames = _bkg_median > 300.0
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
-											flux=strip_units(self.flux),
+											flux=deepcopy(self.flux),
 											bkg_prev=bkg_pre_fix if blend_dynamic else None,
 											bkgmask=self._bkgmask,
 											gauss_smooth=gauss_smooth,

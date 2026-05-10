@@ -1440,14 +1440,8 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		frame = bkg[i].copy()
 		excess = np.zeros(len(strap_cols))
 
-		if has_straps:
-			if flux is not None:
-				_, excess, _ = sigma_clipped_stats((flux[i] - frame)[:, strap_cols], axis=0)
-			else:
-				interp = np.zeros((NY, len(strap_cols)))
-				for r in range(NY):
-					interp[r] = np.interp(strap_cols, good_cols, frame[r, good_cols])
-				_, excess, _ = sigma_clipped_stats(frame[:, strap_cols] - interp, axis=0)
+		if has_straps and flux is not None:
+			_, excess, _ = sigma_clipped_stats((flux[i] - frame)[:, strap_cols], axis=0)
 			frame[:, strap_cols] -= excess
 
 		try:
@@ -1590,15 +1584,8 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		smooth_sigma = 1.0 if is_high_bkg else gauss_smooth
 		fixed = gaussian_filter(frame, sigma=smooth_sigma)
 
-		if has_straps:
-			if flux is not None:
-				_, excess, _ = sigma_clipped_stats((flux[i] - fixed)[:, strap_cols], axis=0)
-				fixed[:, strap_cols] += excess
-			else:
-				interp = np.zeros((NY, len(strap_cols)))
-				for r in range(NY):
-					interp[r] = np.interp(strap_cols, good_cols, fixed[r, good_cols])
-				_, excess, _ = sigma_clipped_stats(fixed[:, strap_cols] - interp, axis=0)
+		if has_straps and flux is not None:
+			_, excess, _ = sigma_clipped_stats((flux[i] - fixed)[:, strap_cols], axis=0)
 			fixed[:, strap_cols] += excess
 
 		lap_abs = np.abs(laplace(fixed))
@@ -1667,11 +1654,11 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		)
 		bkg_fixed += np.array(corrections)
 
-	if has_straps:
-		for i, excess in enumerate(excesses):
+	# if has_straps:
+		# for i, excess in enumerate(excesses):
 			# use view to avoid numpy advanced-indexing shape ambiguity
-			frame_view = bkg_fixed[i]
-			frame_view[:, strap_cols] += excess
+			# frame_view = bkg_fixed[i]
+			# frame_view[:, strap_cols] += excess
 
 	return bkg_fixed, sharp_masks, bad_bkg_masks
 
