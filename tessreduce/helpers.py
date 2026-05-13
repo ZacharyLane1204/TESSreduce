@@ -177,6 +177,21 @@ def parallel_bkg3(data,mask):
 	estimate = inpaint.inpaint_biharmonic(data,mask)
 	return estimate
 
+def _background2d_frame(frame, box_size, filter_size, sc, estimator, mask=None):
+	from photutils.background import Background2D
+	return Background2D(frame, box_size=box_size, filter_size=filter_size,
+						sigma_clip=sc, bkg_estimator=estimator,
+						mask=mask, fill_value=0.0).background
+
+def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None):
+	from photutils.background import MedianBackground
+	from astropy.stats import SigmaClip
+	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
+	estimator = MedianBackground()
+	return np.array(Parallel(n_jobs=n_jobs)(
+		delayed(_background2d_frame)(frame, box_size, filter_size, sc, estimator, mask)
+		for frame in cube))
+
 def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 	"""
 	Interpolate over the masked objects to derive a background estimate. 
@@ -1477,7 +1492,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 
 		if not is_high_bkg:
 			sigma_coarse = _block_sigma(resid, anom_box)
-			flagged_coarse = np.abs(resid) > n_sigma * sigma_coarse
+			flagged_coarse = (np.abs(resid) > n_sigma * sigma_coarse) & ~phot_mask
 
 			# Build SEP source mask on |Laplacian(frame)|.
 			import sep as _sep
@@ -1552,14 +1567,14 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 					trend_fine = trend
 
 				if sharp_mask.any():
-					frame[sharp_mask] = trend_fine[sharp_mask]
+					frame[sharp_mask & ~phot_mask] = trend_fine[sharp_mask & ~phot_mask]
 
 				resid_fine = frame - trend_fine
 				sigma_fine = _block_sigma(resid_fine, anom_box_fine)
-				flagged_fine = np.abs(resid_fine) > n_sigma * sigma_fine
+				flagged_fine = (np.abs(resid_fine) > n_sigma * sigma_fine) & ~phot_mask
 				confirmed = smooth_mask & flagged_fine
 				if confirmed.any():
-					dilated = binary_dilation(confirmed, structure=disk)
+					dilated = binary_dilation(confirmed, structure=disk) & ~phot_mask
 					frame[dilated] = trend_fine[dilated]
 
 		# Blend toward bkg_prev before smoothing so smoothing is not overridden.
@@ -1581,9 +1596,10 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 					_, idx = distance_transform_edt(np.isnan(w), return_indices=True)
 					w[diff_mask] = w[tuple(idx[:, diff_mask])]
 			w[sharp_mask] = 0.0
+			w[phot_mask] = 0.0
 			frame = (1 - w) * frame + w * prev_frame
 
-		smooth_sigma = 1.0 if is_high_bkg else gauss_smooth
+		smooth_sigma = 2.0 if is_high_bkg else gauss_smooth
 		fixed = gaussian_filter(frame, sigma=smooth_sigma)
 
 		if has_straps and flux is not None:
@@ -1619,7 +1635,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 			finite_vals = residual[~exclude_mask & np.isfinite(residual)]
 			med = np.nanmedian(finite_vals)
 			std = np.nanstd(finite_vals)
-			transient_mask = exclude_mask | (residual > med + 5 * std)
+			transient_mask = exclude_mask | (np.abs(residual - med) > 5 * std)
 			try:
 				b = Background2D(residual, box_size=res_box, filter_size=3,
 								 sigma_clip=sc, bkg_estimator=MedianBackground(),

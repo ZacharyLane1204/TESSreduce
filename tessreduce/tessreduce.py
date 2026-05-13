@@ -47,7 +47,7 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=RuntimeWarning) 
 _visible_dep_warning = getattr(getattr(np, 'exceptions', np), 'VisibleDeprecationWarning', None)
 if _visible_dep_warning is not None:
-    warnings.filterwarnings("ignore", category=_visible_dep_warning)
+	warnings.filterwarnings("ignore", category=_visible_dep_warning)
 pd.options.mode.chained_assignment = None
 
 # set the package directory so we can load in a file later
@@ -781,11 +781,44 @@ class tessreduce():
 
 
 				if rerun_diff:
-					sub = (deepcopy(self.flux) - bkg_smth)
-					s = np.std(sub,axis=0)
-					m,med,std = sigma_clipped_stats(s)
-					resid_mask = (s > med+5*std) * 1.0
-					resid_mask = convolve(resid_mask,np.ones((2,2))) > 1
+					from photutils.background import Background2D, MedianBackground
+					from astropy.stats import SigmaClip
+					from scipy.ndimage import label
+
+					bkg_smth = np.array(bkg_smth)
+					mean_bkg = np.nanmean(bkg_smth,axis=(1,2))
+					low = bkg_smth[mean_bkg < 300]
+					fixed_bkg = gaussian_filter(low, sigma=6,axes = 0)
+					fixed = flux[mean_bkg < 300] - fixed_bkg
+					# np.save('intermediate_flux.npy',fixed)
+					# np.save('intermediate_bkg.npy',fixed_bkg)
+					m,med,std = sigma_clipped_stats(fixed,axis=0)
+
+					estimator = MedianBackground()
+					sc = SigmaClip(sigma=5, maxiters=5)
+					b = Background2D(std,
+									box_size=5,
+									filter_size=3,
+									sigma_clip=sc,
+									bkg_estimator=estimator,
+									fill_value=0.0)
+					std_sub = std - b.background
+					_,smed,sstd = sigma_clipped_stats(std_sub)
+					resid_mask = (std_sub > smed + 3*sstd) * 1.0
+					ny, nx = resid_mask.shape
+					resid_mask = convolve(resid_mask, np.ones((3, 3))) > 1
+					labeled, n_comp = label(resid_mask)
+					filtered = np.zeros_like(resid_mask)
+					for comp in range(1, n_comp + 1):
+						pix = labeled == comp
+						if pix.sum() > 2000:
+							continue
+						filtered[pix] = 1
+					filtered[:2, :] = 0
+					filtered[-2:, :] = 0
+					filtered[:, :2] = 0
+					filtered[:, -2:] = 0
+					resid_mask = filtered
 					if source_hunt | (len(self.mask.shape) == 3):
 						new_mask = deepcopy(sm)
 						new_mask[:,resid_mask[:,:]] = np.nan
@@ -839,13 +872,18 @@ class tessreduce():
 			self.bkg = smoothed
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
-		if not calc_qe:
+		if rerun_diff:
 			#final correction
 			f = deepcopy(self.flux)
+			f -= self.bkg
 			# m, med, std = sigma_clipped_stats(f - self.bkg, axis=(1, 2))
-			_p = (f - self.bkg).reshape(len(self.bkg), -1)
-			med = np.median(_p, axis=1)
-			self.bkg += med[:,np.newaxis,np.newaxis]
+			bkg2d_mask = np.isnan(np.asarray(self._bkgmask))
+			if bkg2d_mask.ndim == 3:
+				bkg2d_mask = np.any(bkg2d_mask, axis=0)
+			bkg_corr = parallel_background2d(f, box_size=5, filter_size=3, 
+											sigma=3, maxiters=5, n_jobs=self.num_cores, 
+											mask=bkg2d_mask)
+			self.bkg += bkg_corr
 
 			bkgmask_arr = np.asarray(self._bkgmask)
 			if len(self.mask.shape) == 3:
@@ -1094,8 +1132,8 @@ class tessreduce():
 			if n < 10:
 				continue
 
-			seg = new_bkg[seg_idx]    # (n, X, Y)
-			av  = av_bkg[seg_idx]     # (n,)
+			seg = new_bkg[seg_idx]	# (n, X, Y)
+			av  = av_bkg[seg_idx]	 # (n,)
 
 			# SavGol window sizes — wide for stable regions, narrow for variable.
 			# SavGol is strictly local (±window/2 frames) so it does not
@@ -1137,7 +1175,7 @@ class tessreduce():
 		# Use only source-free pixels so that star/galaxy flux does not
 		# bias the correction upward.
 		bkg_pixel_mask = ~(self.mask & 1).astype(bool)   # True = background
-		flux = deepcopy(self.flux) - new_bkg         # (T, X, Y)
+		flux = deepcopy(self.flux) - new_bkg		 # (T, X, Y)
 		flux_bkg = flux.copy().astype(float)
 		flux_bkg[:, ~bkg_pixel_mask] = np.nan
 		med = np.nanmedian(flux_bkg, axis=(1, 2))
