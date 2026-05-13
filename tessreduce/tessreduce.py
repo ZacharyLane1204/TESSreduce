@@ -880,7 +880,7 @@ class tessreduce():
 			bkg2d_mask = np.isnan(np.asarray(self._bkgmask))
 			if bkg2d_mask.ndim == 3:
 				bkg2d_mask = np.any(bkg2d_mask, axis=0)
-			bkg_corr = parallel_background2d(f, box_size=9, filter_size=1,
+			bkg_corr = parallel_background2d(f, box_size=9, filter_size=3,
 											sigma=3, maxiters=5, n_jobs=self.num_cores,
 											mask=bkg2d_mask)
 			self.bkg += bkg_corr
