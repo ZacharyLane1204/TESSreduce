@@ -1619,7 +1619,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 
 		return fixed, excess, sharp_mask, bad_bkg_mask
 
-	results = Parallel(n_jobs=n_jobs)(delayed(_process)(i) for i in range(T))
+	results = Parallel(n_jobs=n_jobs, prefer='threads')(delayed(_process)(i) for i in range(T))
 	bkg_fixed = np.array([r[0] for r in results])
 	excesses = [r[1] for r in results]
 	sharp_masks = np.array([r[2] for r in results])
@@ -1664,7 +1664,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 			return corr
 
 		residuals = flux - bkg_fixed
-		corrections = Parallel(n_jobs=n_jobs)(
+		corrections = Parallel(n_jobs=n_jobs, prefer='threads')(
 			delayed(_fit_residual)(
 				residuals[i],
 				np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
