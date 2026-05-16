@@ -179,9 +179,13 @@ def parallel_bkg3(data,mask):
 
 def _background2d_frame(frame, box_size, filter_size, sc, estimator, mask=None):
 	from photutils.background import Background2D
-	return Background2D(frame, box_size=box_size, filter_size=filter_size,
-						sigma_clip=sc, bkg_estimator=estimator,
-						mask=mask, fill_value=0.0).background
+	try:
+		return Background2D(frame, box_size=box_size, filter_size=filter_size,
+							sigma_clip=sc, bkg_estimator=estimator,
+							mask=mask, fill_value=0.0,
+							exclude_percentile=50).background
+	except Exception:
+		return np.full_like(frame, np.nanmedian(frame))
 
 def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None):
 	from photutils.background import MedianBackground
