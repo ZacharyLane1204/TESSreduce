@@ -3,6 +3,7 @@ Import packages!
 """
 import traceback
 import os
+import time
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -132,7 +133,7 @@ class tessreduce():
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
-				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=4,create_lc=True,center_mask=True):
+				 smooth_motion=False,orbit_ref=False,bkg_gauss_sigma=4,create_lc=True,center_mask=True,timing=False):
 
 		"""
 		Class for extracting reduced TESS photometry around a target coordinate or event. 
@@ -192,6 +193,8 @@ class tessreduce():
 			Path to local TESS PRF files. The default is currently a specific location on the OzStar supercomputer.
 		verbose : int, optional
 			Controls the level of verbosity, 0 is none, 1 is verbose. The default is 1.
+		timing : bool, optional
+			Print execution time reports for major pipeline blocks in background() and reduce(). The default is False.
 
 		"""
 
@@ -231,6 +234,7 @@ class tessreduce():
 		self._ref_time_window = ref_time_window
 		self._quality_bitmask = quality_bitmask
 		self._smooth_motion = smooth_motion
+		self._timing = timing
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -704,13 +708,16 @@ class tessreduce():
 			Using PSF, search for sources in each frame that may not have been masked out by the catalogue source mask. The default is False.
 		interpolate : bool, optional
 			Interpolate over masked out objects when calculating background. The default is True.
-		
+
 		Assigns
 		-------
 		bkg : np.array
 			Spatially varying background for each frame.
 
 		"""
+		_times = {}
+		_t0_total = time.perf_counter()
+
 		if gauss_smooth is None:
 			gauss_smooth = self._bkg_gauss_sigma
 		# b = np.nansum(self.flux,axis=(1,2))
@@ -736,6 +743,7 @@ class tessreduce():
 		# 		strap_cols = strap_cols.any(axis=0)
 		# 	m[strap_cols] = np.nan
 
+		_t = time.perf_counter()
 		if strap_iso:
 			m = (self.mask == 0) * 1.
 		else:
@@ -748,6 +756,7 @@ class tessreduce():
 			sm[sm==0] = np.nan
 			m = sm * m
 		self._bkgmask = m
+		_times['mask creation'] = time.perf_counter() - _t
 
 		# Calculate the smooth background 
 		if (self.flux.shape[1] > 30) & (self.flux.shape[2] > 30):
@@ -757,8 +766,11 @@ class tessreduce():
 
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
+				_t = time.perf_counter()
 				bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
+				_times['initial smooth background'] = time.perf_counter() - _t
 				if rerun_negative:
+					_t = time.perf_counter()
 					if self._use_error_image:
 						over_sub = (deepcopy(self.flux) - bkg_smth) < -self.eflux # -0.5
 					else:
@@ -778,9 +790,11 @@ class tessreduce():
 						m[over_sub] = 1
 					self._bkgmask = m
 					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
 
 
 				if rerun_diff:
+					_t = time.perf_counter()
 					from photutils.background import Background2D, MedianBackground
 					from astropy.stats import SigmaClip
 					from scipy.ndimage import label
@@ -831,17 +845,21 @@ class tessreduce():
 					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
 						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux)
+					_times['residual surface rerun'] = time.perf_counter() - _t
 
 			else:
+				_t = time.perf_counter()
 				for i in range(flux.shape[0]):
 					bkg_smth[i] = Smooth_bkg((flux*m)[i],0,interpolate)
+				_times['initial smooth background'] = time.perf_counter() - _t
 		else:
 			print('Small tpf, using percentile cut background')
 			self.small_background()
 			bkg_smth = self.bkg
 		
-		# Calculate quantum efficiency 
+		# Calculate quantum efficiency
 		self.bkg = np.array(bkg_smth)
+		_t = time.perf_counter()
 		if calc_qe:
 			self._calc_qe()#,self.eflux)
 			self.bkg *= self.qe
@@ -863,16 +881,20 @@ class tessreduce():
 											gauss_smooth=gauss_smooth,
 											high_bkg_frames=_high_bkg_frames,
 											n_jobs=self.num_cores)
+		_times['anomaly fixing'] = time.perf_counter() - _t
 
+		_t = time.perf_counter()
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores)
 		if smoother._df is not None:
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
+		_times['adaptive temporal smoothing'] = time.perf_counter() - _t
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if rerun_diff:
+			_t = time.perf_counter()
 			#final correction
 			f = deepcopy(self.flux)
 			f -= self.bkg
@@ -897,6 +919,14 @@ class tessreduce():
 				else:
 					new_sources = np.isnan(bkgmask_arr)
 			self.mask = self.mask | (new_sources.astype(self.mask.dtype) * 8)
+			_times['final residual correction'] = time.perf_counter() - _t
+
+		if self._timing:
+			_total = time.perf_counter() - _t0_total
+			print('\nBackground timing report:')
+			for _name, _elapsed in _times.items():
+				print(f'  {_name:<38s} {_elapsed:6.2f}s  ({100*_elapsed/_total:5.1f}%)')
+			print(f'  {"total":<38s} {_total:6.2f}s')
 
 		#self._bkg_temporal_smooth()
 		#self._bkg_adaptive_smooth()
@@ -2555,6 +2585,8 @@ class tessreduce():
 		"""
 		# make reference
 		try:
+			_times = {}
+			_t0_total = time.perf_counter()
 			self._update_reduction_params(align, parallel, calibrate, plot, diff_lc, diff, verbose,corr_correction,imaging)
 
 			if (self.flux.shape[1] < 30) & (self.flux.shape[2] < 30):
@@ -2566,10 +2598,13 @@ class tessreduce():
 				print('Unlikely to get good shifts from a small tpf, so shift has been set to False')
 				self.align = False
 
+			_t = time.perf_counter()
 			self.get_ref(ref_start,ref_stop)
+			_times['reference frame'] = time.perf_counter() - _t
 			if self.verbose > 0:
 				print('made reference')
 			# make source mask
+			_t = time.perf_counter()
 			if mask is None:
 				self.make_mask(catalogue_path=self._catalogue_path,maglim=18,strapsize=7,scale=mask_scale)
 				frac = np.nansum((self.mask == 0) * 1.) / (self.mask.shape[0] * self.mask.shape[1])
@@ -2588,15 +2623,18 @@ class tessreduce():
 					temp = np.zeros_like(self.flux,dtype=int)
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
+			_times['source mask'] = time.perf_counter() - _t
 			# calculate background for each frame
 			if self.verbose > 0:
 				print('calculating background')
 			
 			# calculate the background
 			#self.flux -= self.ref
+			_t = time.perf_counter()
 			self.background(rerun_negative=True)
 			#self.flux += self.ref
 			self.flux -= self.bkg
+			_times['background (pass 1)'] = time.perf_counter() - _t
 
 			if np.isnan(self.bkg).all():
 				# check to see if the background worked
@@ -2614,10 +2652,11 @@ class tessreduce():
 			if np.isnan(self.flux).all():
 				raise ValueError('flux all nans')
 
+			_t = time.perf_counter()
 			if self.align:
 				if self.verbose > 0:
 					print('aligning images')
-				
+
 				# try:
 				if self._shift_method  == 'centroid':
 					self.centroids_shifts_starfind()
@@ -2638,9 +2677,9 @@ class tessreduce():
 					#if double_shift:
 					#self.shift_images()
 					#self.ref = deepcopy(self.flux[self.ref_ind])
-					
+
 					#self.shift_images()
-					
+
 				# except:
 				# 	print('Something went wrong, switching to serial')
 				# 	self.parallel = False
@@ -2650,11 +2689,14 @@ class tessreduce():
 				# 		self.fit_shift()
 			else:
 				self.shift = np.zeros((len(self.flux),2))
+			_times['alignment'] = time.perf_counter() - _t
 			
 			if not self.diff:
 				if self.align:
+					_t = time.perf_counter()
 					self.shift_images()
 					self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
+					_times['image shifting'] = time.perf_counter() - _t
 					if self.verbose > 0:
 						print('images shifted')
 					#if self.kernel_match:
@@ -2663,8 +2705,8 @@ class tessreduce():
 			if self.diff:
 				if self.verbose > 0:
 					print('!!Re-running for difference image!!')
-				# reseting to do diffim 
-				
+				# reseting to do diffim
+				_t = time.perf_counter()
 				self.flux = strip_units(self.tpf.flux)
 				self.flux = self.flux / self.qe
 
@@ -2694,12 +2736,12 @@ class tessreduce():
 				if frac < 0.05:
 					print('!!!WARNING!!! mask is too dense, lowering mask_scale to 0.5, and raising maglim to 15. Background quality will be reduced.')
 					self.make_mask(catalogue_path=self._catalogue_path,maglim=11,strapsize=7,scale=mask_scale*.5*.5)
-				# assuming that the target is in the centre, so masking it out 
+				# assuming that the target is in the centre, so masking it out
 				#m_tar = np.zeros_like(self.mask,dtype=int)
 				#m_tar[self.ref.shape[0]//2,self.ref.shape[1]//2]= 1
 				#m_tar = convolve(m_tar,np.ones((5,5)))
 				#self.mask = self.mask | m_tar
-				#mask 
+				#mask
 				#mask = convolve(self.mask,np.ones((3,3))) > 1
 				#elf.mask = mask
 				if moving_mask is not None:
@@ -2707,6 +2749,7 @@ class tessreduce():
 					temp = np.zeros_like(self.flux,dtype=int)
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
+				_times['difference imaging setup'] = time.perf_counter() - _t
 
 				if self.verbose > 0:
 					print('remade mask')
@@ -2714,16 +2757,20 @@ class tessreduce():
 				if self.verbose > 0:
 					print('background')
 				self.bkg_orig = deepcopy(self.bkg)
+				_t = time.perf_counter()
 				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,
 								gauss_smooth=self._bkg_gauss_sigma,interpolate=False,
 								rerun_negative=False,rerun_diff=True,blend_dynamic=True)
 				# self._grad_bkg_clip()
 				self.flux -= self.bkg
-				
+				_times['background (pass 2)'] = time.perf_counter() - _t
+
 				if self.corr_correction:
+					_t = time.perf_counter()
 					if self.verbose > 0:
 						print('background correlation correction')
 					self.correlation_corrector()
+					_times['correlation correction'] = time.perf_counter() - _t
 				if self.kernel_match:
 					self.kernel_matching(diff=self.diff)
 					if self.verbose > 0:
@@ -2735,16 +2782,27 @@ class tessreduce():
 					self.orbit_ref_subtract()
 
 			if self.calibrate:
+				_t = time.perf_counter()
 				print('field calibration')
 				self.field_calibrate()
+				_times['field calibration'] = time.perf_counter() - _t
 
 			if self._create_lc:
+				_t = time.perf_counter()
 				self.lc, self.sky = self.diff_lc(plot=self.plot,diff=self.diff,tar_ap=tar_ap,sky_in=sky_in,sky_out=sky_out)
+				_times['light curve'] = time.perf_counter() - _t
 
 			if self.imaging:
 				# if self.verbose > 0:
 				# 	print('Retrieving external photometry')
 				self.external_photometry()
+
+			if self._timing:
+				_total = time.perf_counter() - _t0_total
+				print('\nReduce timing report:')
+				for _name, _elapsed in _times.items():
+					print(f'  {_name:<35s} {_elapsed:6.2f}s  ({100*_elapsed/_total:5.1f}%)')
+				print(f'  {"total":<35s} {_total:6.2f}s')
 
 		except Exception:
 			print(traceback.format_exc())

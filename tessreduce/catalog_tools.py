@@ -40,7 +40,7 @@ def Get_Catalogue(tpf, Catalog = 'gaia'):
 	from astroquery.vizier import Vizier
 	Vizier.ROW_LIMIT = -1
 	if Catalog == 'gaia':
-		catalog = "I/345/gaia2"
+		catalog = "I/355/gaiadr3"
 	elif Catalog == 'dist':
 		catalog = "I/355/gaiadr3"
 	elif Catalog == 'ps1':
@@ -122,9 +122,9 @@ def Get_Catalogue_External(ra,dec,size,Catalog = 'gaia'):
 	from astroquery.vizier import Vizier
 	Vizier.ROW_LIMIT = -1
 	if Catalog == 'gaia':
-		catalog = "I/345/gaia2"
+		catalog = "I/355/gaiadr3"
 	elif Catalog == 'dist':
-		catalog = "I/350/gaiaedr3"
+		catalog = "I/355/gaiadr3"
 	elif Catalog == 'ps1':
 		catalog = "II/349/ps1"
 	elif Catalog == 'skymapper':
@@ -195,14 +195,16 @@ def Get_Gaia_External(ra,dec,size,wcsObj,magnitude_limit = 18, Offset = 10):
 
 	source = result['Source'].values
 	Gmag = result['Gmag'].values
+	RPmag = result['RPmag'].values
 	#Jmag = result['Jmag']
-	ind = (((coords[:,0] >= -10) & (coords[:,1] >= -10)) & 
+	ind = (((coords[:,0] >= -10) & (coords[:,1] >= -10)) &
 		   ((coords[:,0] < (size + 10)) & (coords[:,1] < (size + 10))))
 	coords = coords[ind]
 	radecs = radecs[ind]
 	Gmag = Gmag[ind]
+	RPmag = RPmag[ind]
 	source = source[ind]
-	Tmag = Gmag - 0.5
+	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag, Gmag - 0.5)
 	#Jmag = Jmag[ind]
 	return radecs, Tmag, source
 
@@ -236,12 +238,14 @@ def Get_Gaia(tpf, magnitude_limit = 18, Offset = 10):
 	radecs = np.vstack([result['RA_ICRS'], result['DE_ICRS']]).T
 	coords = tpf.wcs.all_world2pix(radecs, 0) ## TODO, is origin supposed to be zero or one?
 	Gmag = result['Gmag'].values
+	RPmag = result['RPmag'].values
 	#Jmag = result['Jmag']
-	ind = (((coords[:,0] >= -10) & (coords[:,1] >= -10)) & 
+	ind = (((coords[:,0] >= -10) & (coords[:,1] >= -10)) &
 		   ((coords[:,0] < (tpf.shape[2] + 10)) & (coords[:,1] < (tpf.shape[1] + 10))))
 	coords = coords[ind]
 	Gmag = Gmag[ind]
-	Tmag = Gmag - 0.5
+	RPmag = RPmag[ind]
+	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag, Gmag - 0.5)
 	#Jmag = Jmag[ind]
 	return coords, Tmag
 
