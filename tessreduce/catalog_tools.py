@@ -204,7 +204,7 @@ def Get_Gaia_External(ra,dec,size,wcsObj,magnitude_limit = 18, Offset = 10):
 	Gmag = Gmag[ind]
 	RPmag = RPmag[ind]
 	source = source[ind]
-	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag, Gmag - 0.5)
+	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag + 0.37, Gmag + 0.10 - 0.5)
 	#Jmag = Jmag[ind]
 	return radecs, Tmag, source
 
@@ -245,7 +245,7 @@ def Get_Gaia(tpf, magnitude_limit = 18, Offset = 10):
 	coords = coords[ind]
 	Gmag = Gmag[ind]
 	RPmag = RPmag[ind]
-	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag, Gmag - 0.5)
+	Tmag = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag + 0.37, Gmag + 0.10 - 0.5)
 	#Jmag = Jmag[ind]
 	return coords, Tmag
 
