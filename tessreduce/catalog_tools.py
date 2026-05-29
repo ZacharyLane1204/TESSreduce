@@ -518,7 +518,7 @@ def external_save_cat(tpf,save_path,maglim):
 def external_load_cat(path,maglim):
 
 	gaia = pd.read_csv(path)
-	gaia = gaia[gaia['mag']<(maglim-0.5)]
+	gaia = gaia[gaia['mag']<maglim]
 	gaia = gaia[['ra','dec','mag']]
 	return gaia
 
