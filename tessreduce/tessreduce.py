@@ -478,6 +478,7 @@ class tessreduce():
 		tpf = tess.download(quality_bitmask=quality_bitmask,cutout_size=size,download_dir=cache_dir)
 		if not cache:
 			try:
+				tpf.hdu.close()
 				os.remove(tpf.path)
 				if self.verbose > 0:
 					print('Cache removed')
