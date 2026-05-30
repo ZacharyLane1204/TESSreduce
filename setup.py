@@ -29,14 +29,18 @@ REQUIRED = ['lightkurve>=2.0.0',
             'pandas',
             'scipy!=1.4.0,!=1.4.1,>=0.19.0',
             'astropy',
+            'astroquery',
             'joblib',
-            'multiprocess',
             'scikit-image',
+            'scikit-learn',
+            'Pillow',
+            'requests',
+            'sep',
+            'tqdm',
             'alerce',
             'tess-point',
             'tabulate',
-            'TESS_PRF',
-            'opencv-python']
+            'TESS_PRF']
 
 # What packages are optional?
 EXTRAS = {
