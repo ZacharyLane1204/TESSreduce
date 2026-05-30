@@ -4,7 +4,6 @@ import json
 from copy import deepcopy
 
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 
 from PIL import Image
@@ -25,10 +24,6 @@ from scipy.interpolate import interp1d
 from scipy.interpolate import griddata
 from scipy.optimize import minimize
 from scipy.signal import fftconvolve
-from sklearn.cluster import OPTICS
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import make_pipeline
 from skimage.restoration import inpaint
 
 
@@ -457,6 +452,8 @@ def smooth_zp(zp,time):
 		smoothed displacement of the centroids
 
 	"""
+	import matplotlib.pyplot as plt
+
 	smoothed = np.zeros_like(zp) * np.nan
 	plt.figure()
 	plt.plot(time,zp,'.')
@@ -928,6 +925,7 @@ def Multiple_day_breaks(lc):
 #### CLUSTERING 
 
 def Cluster_lc(lc):
+	from sklearn.cluster import OPTICS
 	arr = np.array([np.gradient(lc[1]),lc[1]])
 	clust = OPTICS(min_samples=12, xi=.05, min_cluster_size=.05)
 	opt = clust.fit(arr.T)
@@ -1013,6 +1011,7 @@ def _Get_im(ra, dec, size,color):
 	return im
 
 def _Panstarrs_phot(ra,dec,size):
+	import matplotlib.pyplot as plt
 
 	grey_im = _Get_im(ra,dec,size=size*4,color=False)
 	colour_im = _Get_im(ra,dec,size=size*4,color=True)
@@ -1035,6 +1034,7 @@ def _Skymapper_phot(ra,dec,size):
 	"""
 	Gets g,r,i from skymapper.
 	"""
+	import matplotlib.pyplot as plt
 
 	size /= 3600
 
@@ -1150,6 +1150,9 @@ def Surface_names2model(names):
 				for i,n in enumerate(names)])
 
 def clip_background(bkg,mask,sigma=3,kern_size=5):
+	from sklearn.preprocessing import PolynomialFeatures
+	from sklearn.linear_model import LinearRegression
+	from sklearn.pipeline import make_pipeline
 	regions, max_reg, ystep, xstep = subdivide_region(bkg)
 	b2 = deepcopy(bkg)
 	for j in range(2):

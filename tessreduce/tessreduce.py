@@ -5,12 +5,9 @@ import traceback
 import os
 import time
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 
 import lightkurve as lk
-from photutils.detection import StarFinder
-from PRF import TESS_PRF
 
 from copy import deepcopy
 
@@ -18,28 +15,19 @@ from scipy.ndimage import convolve
 from scipy.ndimage import shift
 
 from scipy.signal import savgol_filter
-from scipy.stats import pearsonr
-from scipy.interpolate import interp1d
 
 from astropy.stats import sigma_clipped_stats
 from astropy.stats import sigma_clip
-from astropy.coordinates import SkyCoord
-from astropy import units as u
-from astropy.time import Time
 
 import multiprocessing
 from joblib import Parallel, delayed
-from tqdm import tqdm
 
 from .catalog_tools import *
 from .calibration_tools import *
 from .ground_tools import ground
-from .rescale_straps import correct_straps
 from .lastpercent import *
-from .psf_photom import create_psf
 from .helpers import *
 from .cat_mask import Cat_mask
-from .delta_function_fitting import parallel_delta_diff
 
 # turn off runtime warnings (lots from logic on nans)
 import warnings
@@ -466,6 +454,9 @@ class tessreduce():
 
 		"""
 		
+		from astropy.coordinates import SkyCoord
+		from astropy import units as u
+
 		if sector is None:
 			sector = self.sector
 
@@ -605,6 +596,8 @@ class tessreduce():
 			Source bitmask.
 			
 		"""
+
+		from PRF import TESS_PRF
 
 		col = self.tpf.column + int(self.size//2) # find column and row, when specifying location on a *say* 90x90 px cutout
 		row = self.tpf.row + int(self.size//2)
@@ -1135,6 +1128,7 @@ class tessreduce():
 		clip_sigma : float
 			Sigma threshold for outlier frame rejection. Default 5.0.
 		"""
+		import matplotlib.pyplot as plt
 		if plot is None:
 			plot = self.diagnostic_plot
 		if savename is None:
@@ -1361,6 +1355,9 @@ class tessreduce():
 
 		"""
 
+		from PRF import TESS_PRF
+		from photutils.detection import StarFinder
+
 		if plot is None:
 			plot = self.diagnostic_plot
 		if savename is None:
@@ -1438,6 +1435,7 @@ class tessreduce():
 			x,y shift of sources over the time series.
 
 		"""
+		import matplotlib.pyplot as plt
 
 		if plot is None:
 			plot = self.diagnostic_plot
@@ -1494,6 +1492,7 @@ class tessreduce():
 				plt.savefig(savename+'_disp_corr.pdf', bbox_inches = "tight")
 
 	def plot_shifts(self,savename=None):
+		import matplotlib.pyplot as plt
 		t = self.tpf.time.mjd
 		shifts = self.shift
 		ind = np.where(np.diff(t) > .5)[0]
@@ -1650,6 +1649,7 @@ class tessreduce():
 		return binf, bint
 
 	def check_trend(self,lc=None,limit=0.6):
+		from scipy.stats import pearsonr
 		if lc is None:
 			lc = self.lc[1]
 		#print('!!!! ',lc.shape)
@@ -1713,6 +1713,8 @@ class tessreduce():
 			DESCRIPTION.
 
 		"""
+		import matplotlib.pyplot as plt
+
 		if plot is None:
 			plot = self.diagnostic_plot
 		if savename is None:
@@ -1852,6 +1854,7 @@ class tessreduce():
 		Figure.
 
 		"""
+		import matplotlib.pyplot as plt
 
 		if lc is None:
 			lc = self.lc
@@ -1923,6 +1926,7 @@ class tessreduce():
 		Figure.
 
 		"""
+		import matplotlib.pyplot as plt
 
 		if ground:
 			if self.ground.ztf is None:
@@ -2046,6 +2050,9 @@ class tessreduce():
 			The input lightcurve wrapped in the lightkurve format.
 
 		"""
+		from astropy import units as u
+		from astropy.time import Time
+
 		if lc is None:
 			lc = self.lc
 		if flux_unit is None:
@@ -2387,12 +2394,14 @@ class tessreduce():
 
 		"""
 		
+		from .psf_photom import create_psf
+
 		if diff is None:
 			diff = self.diff
 		flux = []
 
 		# if isinstance(xPix,(list,np.ndarray)):
-		# 	self.moving_psf_phot() 
+		# 	self.moving_psf_phot()
 
 		if type(snap) == str:
 			if snap == 'all': 
@@ -2502,6 +2511,7 @@ class tessreduce():
 			print(f'Orbit ref subtraction: {dict(zip(orbs, counts))} frames per orbit')
 
 	def kernel_matching(self,size=7,diff=True):
+		from .delta_function_fitting import parallel_delta_diff
 		if diff:
 			flux = deepcopy(self.flux + self.ref)
 		else:
@@ -2934,6 +2944,8 @@ class tessreduce():
 		None.
 
 		"""
+		import matplotlib.pyplot as plt
+
 		if self.events is None:
 			self.lc_events(**kwargs)
 		plt.figure()
@@ -2982,7 +2994,9 @@ class tessreduce():
 			Lightcurve with the stellar trends subtracted.
 
 		"""
-		# Make a smoothing value with a significant portion of the total 
+		import matplotlib.pyplot as plt
+
+		# Make a smoothing value with a significant portion of the total
 		
 		if lc is None:
 			lc = self.lc[:2]
@@ -3432,6 +3446,8 @@ class tessreduce():
 				Error in the photometric zeropoint
 
 		"""
+		import matplotlib.pyplot as plt
+
 		if plot is None:
 			plot = self.diagnostic_plot
 		if savename is None:

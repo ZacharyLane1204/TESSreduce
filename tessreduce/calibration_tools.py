@@ -4,7 +4,6 @@ dirname = os.path.dirname(__file__)
 
 import astropy.table as at
 from collections import OrderedDict
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
 import astropy.table as at
@@ -169,6 +168,8 @@ def Tonry_reduce(Data,plot=False,savename=None,system='ps1'):
     dat : dataframe
         Source catalog with added index of if source is on the stellar locus
     '''
+    import matplotlib.pyplot as plt
+
     data = deepcopy(Data)
     if system.lower() == 'ps1':
         tonry = np.loadtxt(os.path.join(dirname,'Tonry_splines.txt'))
@@ -326,8 +327,10 @@ def Dist_tensor(X,Y,K,Colours,fitfilt='',Tensor=False,Plot = False):
     Returns
     -------
     residual : float
-        residuals of distances from all points to the model locus. 
+        residuals of distances from all points to the model locus.
     """
+    import matplotlib.pyplot as plt
+
     ob_x, ob_y, locus = Get_lcs(X,Y,K,Colours,fitfilt)
     
     ind = np.where((Colours['obs g-r'][0,:] <= .8) & (Colours['obs g-r'][0,:] >= 0.2))[0]
