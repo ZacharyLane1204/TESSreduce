@@ -254,8 +254,8 @@ class TestMultipleDayBreaks(unittest.TestCase):
 
 class TestSmoothZp(unittest.TestCase):
 
-    @patch('tessreduce.helpers.plt.figure')
-    @patch('tessreduce.helpers.plt.plot')
+    @patch('matplotlib.pyplot.figure')
+    @patch('matplotlib.pyplot.plot')
     def test_returns_smoothed_and_err(self, _mock_plot, _mock_figure):
         rng = np.random.default_rng(5)
         N = 60
@@ -266,8 +266,8 @@ class TestSmoothZp(unittest.TestCase):
         self.assertIsInstance(err, float)
         self.assertGreaterEqual(err, 0.0)
 
-    @patch('tessreduce.helpers.plt.figure')
-    @patch('tessreduce.helpers.plt.plot')
+    @patch('matplotlib.pyplot.figure')
+    @patch('matplotlib.pyplot.plot')
     def test_two_segment_sector(self, _mock_plot, _mock_figure):
         N = 60
         t1 = np.arange(30) * 0.02
