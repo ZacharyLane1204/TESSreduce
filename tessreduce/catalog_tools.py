@@ -518,6 +518,12 @@ def external_save_cat(tpf,save_path,maglim):
 def external_load_cat(path,maglim):
 
 	gaia = pd.read_csv(path)
+	if 'RPmag' in gaia.columns and 'Gmag' in gaia.columns:
+		RPmag = gaia['RPmag'].values
+		Gmag = gaia['Gmag'].values
+		gaia['mag'] = np.where(np.isfinite(RPmag) & (RPmag > 0), RPmag + 0.37, Gmag + 0.10 - 0.5)
+	elif 'Gmag' in gaia.columns:
+		gaia['mag'] = gaia['Gmag'].values + 0.10 - 0.5
 	gaia = gaia[gaia['mag']<maglim]
 	gaia = gaia[['ra','dec','mag']]
 	return gaia
