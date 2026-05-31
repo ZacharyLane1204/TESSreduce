@@ -223,6 +223,7 @@ class tessreduce():
 		self._quality_bitmask = quality_bitmask
 		self._smooth_motion = smooth_motion
 		self._timing = timing
+		self._cache_path = None
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -477,13 +478,9 @@ class tessreduce():
 		# Download 
 		tpf = tess.download(quality_bitmask=quality_bitmask,cutout_size=size,download_dir=cache_dir)
 		if not cache:
-			try:
-				tpf.hdu.close()
-				os.remove(tpf.path)
-				if self.verbose > 0:
-					print('Cache removed')
-			except OSError:
-				print(f'Failed to remove: {tpf.path}')
+			self._cache_path = tpf.path
+		else:
+			self._cache_path = None
 
 		# Check to ensure it succeeded
 		if tpf is None:
@@ -2817,6 +2814,15 @@ class tessreduce():
 
 		except Exception:
 			print(traceback.format_exc())
+
+		if self._cache_path is not None:
+			try:
+				os.remove(self._cache_path)
+				if self.verbose > 0:
+					print('Cache removed')
+			except OSError:
+				print(f'Failed to remove cache: {self._cache_path}')
+			self._cache_path = None
 
 		
 	def external_photometry(self,size=50,phot=None):
