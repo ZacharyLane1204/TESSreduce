@@ -22,6 +22,26 @@ from astropy.stats import sigma_clip
 import multiprocessing
 from joblib import Parallel, delayed
 
+def _available_cores():
+	"""Return the number of CPU cores available to this process.
+
+	Checks in priority order:
+	  1. SLURM_CPUS_PER_TASK - cores allocated by SLURM scheduler
+	  2. os.sched_getaffinity - respects cgroup/affinity limits (Linux)
+	  3. multiprocessing.cpu_count - total node CPUs (fallback)
+	"""
+	slurm = os.environ.get('SLURM_CPUS_PER_TASK')
+	if slurm is not None:
+		try:
+			return int(slurm)
+		except ValueError:
+			pass
+	try:
+		return len(os.sched_getaffinity(0))
+	except AttributeError:
+		pass
+	return multiprocessing.cpu_count()
+
 from .catalog_tools import *
 from .calibration_tools import *
 from .ground_tools import ground
@@ -207,8 +227,8 @@ class tessreduce():
 		self.imaging = imaging
 		self.parallel = parallel
 		self._col_offset = col_offset
-		if isinstance(num_cores, str):
-			self.num_cores = multiprocessing.cpu_count()
+		if num_cores == -1 or isinstance(num_cores, str):
+			self.num_cores = _available_cores()
 		else:
 			self.num_cores = num_cores
 		self._assign_phot_method(phot_method)
@@ -231,7 +251,6 @@ class tessreduce():
 		elif catalogue_path is False:
 			catalogue_path = None
 		self._catalogue_path = catalogue_path
-		self.num_cores = num_cores
 		self.imaging = imaging
 		self._prf_path = prf_path
 		self._vector_path = vector_path
