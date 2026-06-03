@@ -1116,7 +1116,7 @@ def Extract_fits(pixelfile):
 
 def _clip_region(image, rx, ry, sigma, iters):
 	m, me, s = sigma_clipped_stats(image[ry, rx], maxiters=iters)
-	cut = (image[rx, ry] >= me + sigma * s) | (image[rx, ry] <= me - sigma * s)
+	cut = (image[ry, rx] >= me + sigma * s) | (image[ry, rx] <= me - sigma * s)
 	return rx[cut], ry[cut]
 
 def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1):
@@ -1221,16 +1221,16 @@ def grad_clip_fill_bkg(bkg,sigma=3,max_size=1000):
 	b_labeled, b_objects = label(bp)
 	a_labeled, a_objects = label(ap)
 
-	# Component sizes via bincount (preserves original loop range 0..n_objects-1)
-	b_obj_size = np.bincount(b_labeled.ravel(), minlength=b_objects + 1)[:b_objects]
-	a_obj_size = np.bincount(a_labeled.ravel(), minlength=a_objects + 1)[:a_objects]
+	# Component sizes via bincount — labels 1..n_objects, index 0 is background
+	b_obj_size = np.bincount(b_labeled.ravel(), minlength=b_objects + 1)
+	a_obj_size = np.bincount(a_labeled.ravel(), minlength=a_objects + 1)
 
-	# Zero out components outside the valid size range
-	bad_a = np.where((a_obj_size >= max_size) | (a_obj_size <= 9))[0]
+	# Zero out components outside the valid size range (skip label 0 = background)
+	bad_a = np.where((a_obj_size[1:] >= max_size) | (a_obj_size[1:] <= 9))[0] + 1
 	if len(bad_a) > 0:
 		a_labeled[np.isin(a_labeled, bad_a)] = 0
 
-	bad_b = np.where((b_obj_size >= max_size) | (b_obj_size <= 9))[0]
+	bad_b = np.where((b_obj_size[1:] >= max_size) | (b_obj_size[1:] <= 9))[0] + 1
 	if len(bad_b) > 0:
 		b_labeled[np.isin(b_labeled, bad_b)] = 0
 

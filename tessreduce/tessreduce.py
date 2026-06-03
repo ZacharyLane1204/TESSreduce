@@ -671,8 +671,9 @@ class tessreduce():
 		'''
 		time = deepcopy(self.mjd)
 		strap_data = (self.flux) * ((self.mask&4) > 0)*(~self.mask&1)
-		qe = strap_data/self.bkg
-		qe[qe == 0] = np.nan
+		with np.errstate(divide='ignore', invalid='ignore'):
+			qe = strap_data / self.bkg
+		qe[~np.isfinite(qe)] = np.nan
 		m,med,std = sigma_clipped_stats(qe,axis=1,sigma_upper=2)
 		qes = np.ones_like(qe)
 		qes[:,:,:] = med[:,np.newaxis,:]
