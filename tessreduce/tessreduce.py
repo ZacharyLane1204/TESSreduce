@@ -127,7 +127,7 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 
 	n_jobs = _available_cores()
 	residuals = flux - bkg
-	corrections = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(_fit_frame)(residuals[i]) for i in range(flux.shape[0]))
+	corrections = Parallel(n_jobs=n_jobs, backend="multiprocessing")(delayed(_fit_frame)(residuals[i]) for i in range(flux.shape[0]))
 	bkg += np.array(corrections)
 
 	return bkg
@@ -651,7 +651,7 @@ class tessreduce():
 		data = (self._flux_aligned - self.ref) #* mask
 		if self.parallel:
 			try:
-				m = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
+				m = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
 				m = np.array(m)
 			except:
 				m = np.ones_like(data)
@@ -778,7 +778,7 @@ class tessreduce():
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
 				_t = time.perf_counter()
-				bkg_smth = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
+				bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				_times['initial smooth background'] = time.perf_counter() - _t
 				if rerun_negative:
 					_t = time.perf_counter()
@@ -800,7 +800,7 @@ class tessreduce():
 					else:
 						m[over_sub] = 1
 					self._bkgmask = m
-					bkg_smth = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
 
 
@@ -853,7 +853,7 @@ class tessreduce():
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
 					bkg_s1 = np.array(bkg_smth)
-					bkg_smth = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
 						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores)
 					_times['residual surface rerun'] = time.perf_counter() - _t
@@ -996,7 +996,7 @@ class tessreduce():
 			kern = np.ones((1,3,3))
 			dist_mask = convolve(dist_mask,kern) > 0
 			if self.parallel:
-				bkg_3 = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
+				bkg_3 = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
 															for i in np.arange(len(dist_mask)))
 			else:
 				bkg_3 = np.zeros_like(self.bkg)
@@ -1020,7 +1020,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1046,7 +1046,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1402,7 +1402,7 @@ class tessreduce():
 		self._dat_sources = s.to_pandas()
 		
 		if self.parallel:
-			shifts = Parallel(n_jobs=self.num_cores, prefer="threads")(
+			shifts = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(
 				delayed(Calculate_shifts)(frame,mx,my,finder) for frame in f)
 			shifts = np.array(shifts)
 		else:
@@ -1474,7 +1474,7 @@ class tessreduce():
 
 		if self.parallel:
 			ind = np.arange(len(f))
-			shifts = Parallel(n_jobs=self.num_cores, prefer="threads")(
+			shifts = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(
 						#delayed(difference_shifts)(f[i],m,self.eflux[i],eref) for i in ind)
 						delayed(difference_shifts)(f[i],m) for i in ind)
 			shifts = np.array(shifts)
@@ -1548,7 +1548,7 @@ class tessreduce():
 		shifted[nans] = 0.
 		if median:
 			if self.parallel:
-				result = Parallel(n_jobs=self.num_cores, prefer="threads")(
+				result = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(
 					delayed(_shift_ref_one)(self.ref, shifted[i], self.shift[i])
 					for i in range(len(shifted)))
 				shifted = np.array(result)
@@ -1559,7 +1559,7 @@ class tessreduce():
 
 		else:
 			if self.parallel:
-				result = Parallel(n_jobs=self.num_cores, prefer="threads")(
+				result = Parallel(n_jobs=self.num_cores, backend="multiprocessing")(
 					delayed(_shift_one)(shifted[i], self.shift[i])
 					for i in range(len(shifted)))
 				self.flux = np.array(result)
@@ -2267,7 +2267,7 @@ class tessreduce():
 				raise ValueError(m)
 		inds = np.arange(0,len(xpos))
 		if self.parallel:
-			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
+			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
 																						 self.tpf.sector,self.tpf.column,self.tpf.row,
 																					 size,[xpos[i],ypos[i]],time_ind) for i in inds))
 		else:
@@ -2280,7 +2280,7 @@ class tessreduce():
 		cutouts = np.array(cutouts)
 		print('made cutouts')
 		if self.parallel:
-			flux, pos = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
+			flux, pos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
 		else:
 			flux = []
 			pos = []
@@ -2366,14 +2366,14 @@ class tessreduce():
 			eflux = np.zeros(len(self.flux)) * np.nan
 			psfphot2 = PSFPhotometry(epsf, fit_shape, finder=None,aperture_radius=1.5,
 									 xy_bounds=(0.05),localbkg_estimator=localbkg_estimator)
-			f,ef = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
+			f,ef = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
 			f = np.array(f).flatten()
 			ef = np.array(ef).flatten()
 			phot = phot.to_pandas()
 			pos = phot[['x_fit','y_fit']].values + np.array([xPix,yPix]) - size//2
 			epos = phot[['x_err','y_err']].values
 		else:
-			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
+			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
 			pos['x_fit'] += xPix - size//2
 			pos['y_fit'] += xPix - size//2
 		
@@ -2437,7 +2437,7 @@ class tessreduce():
 				prf, cutouts, ecutouts = self._psf_initialise(size,(xPix,yPix),ref=(not diff))	# gather base PRF and the array of cutouts data
 				inds = np.arange(len(cutouts))
 				base = create_psf(prf,size)
-				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
+				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
 
 				#prf, cutouts = self._psf_initialise(size,(xPix,yPix))	# gather base PRF and the array of cutouts data
 				#xShifts = []
@@ -2483,9 +2483,9 @@ class tessreduce():
 				if self.parallel:
 					inds = np.arange(len(cutouts))
 					if self.delta_kernel is not None:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 					else:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 				else:
 					for i in range(len(cutouts)):
 						flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2501,9 +2501,9 @@ class tessreduce():
 			if self.parallel:
 				inds = np.arange(len(cutouts))
 				if self.delta_kernel is not None:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 				else:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 			else:
 				for i in range(len(cutouts)):
 					flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2548,7 +2548,7 @@ class tessreduce():
 		mask = self.mask == 1 
 
 		if self.parallel:
-			d, kernel = zip(*Parallel(n_jobs=self.num_cores, prefer="threads")(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
+			d, kernel = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing")(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
 		else:
 			d = []
 			kernel = []

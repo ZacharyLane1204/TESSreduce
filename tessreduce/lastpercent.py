@@ -55,7 +55,7 @@ def _find_bkg_cor(tess,cores):
     coord = np.c_[y,x]
     cors = np.zeros_like(tess.ref)
 
-    cor = Parallel(n_jobs=cores, prefer="threads")(delayed(_parallel_correlation)
+    cor = Parallel(n_jobs=cores, backend="multiprocessing")(delayed(_parallel_correlation)
                                            (tess.flux[:,coord[i,0],coord[i,1]],
                                             tess.bkg[:,coord[i,0],coord[i,1]],
                                             cors,coord[i],30) for i in range(len(coord)))
@@ -156,7 +156,7 @@ def multi_correlation_cor(tess, limit=0.8, cores=7):
     if len(y) == 0:
         return flux, bkg
 
-    results = Parallel(n_jobs=cores, prefer="threads")(
+    results = Parallel(n_jobs=cores, backend="multiprocessing")(
         delayed(_correct_pixel_correlation)(
             tess.flux[:, y[i], x[i]],
             tess.bkg[:,  y[i], x[i]],
