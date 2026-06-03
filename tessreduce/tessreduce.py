@@ -2763,7 +2763,7 @@ class tessreduce():
 					self.ref = deepcopy(self.flux[self.ref_ind])
 				elif self._ref_type.lower() == 'stack':
 					self.stack_ref()
-				self.ref -= np.nanmin(self.ref)
+				self.ref -= np.nanpercentile(self.ref, 1)
 				self.flux -= self.ref
 
 				# self.ref -= self.bkg[self.ref_ind]

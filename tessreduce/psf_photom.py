@@ -162,7 +162,7 @@ class create_psf():
             error = np.ones_like(image)
         #brightloc = 
         if np.nansum(image) > 0:
-            if np.isfinite(ext_shift).all():
+            if not np.isfinite(ext_shift).all():
                 ext_shift[0] = 0; ext_shift[1] = 0
             normimage = image / np.nansum(image)    # normalise the image
 
@@ -215,10 +215,9 @@ class create_psf():
             s = polynomial_surface(xx,yy,plane_coeff,order)
         else:
             s = 0
-        if kernel is not None:
-            self.psf = fftconvolve(self.psf, kernel, mode='same')
+        psf = fftconvolve(self.psf, kernel, mode='same') if kernel is not None else self.psf
 
-        res = np.nansum((image - self.psf*coeff[0] - s)**2/error)
+        res = np.nansum((image - psf*coeff[0] - s)**2/error)
         return res
 
     def psf_flux(self,image,error=None,ext_shift=None,surface=True,poly_order=3,kernel=None):
