@@ -854,7 +854,7 @@ class tessreduce():
 					bkg_s1 = np.array(bkg_smth)
 					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
-						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux)
+						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores)
 					_times['residual surface rerun'] = time.perf_counter() - _t
 
 			else:
@@ -878,7 +878,7 @@ class tessreduce():
 		bkg_pre_fix = np.array(self.bkg)
 		from .adaptive_background import get_tessvectors, _interpolate_angles
 		_df = get_tessvectors(self.sector, self.tpf.camera, data_path=self._vector_path)
-		_bkg_median = np.array([np.nanmedian(self.bkg[i]) for i in range(len(self.bkg))])
+		_bkg_median = np.nanmedian(self.bkg, axis=(1, 2))
 		if _df is not None:
 			_earth_angle, _moon_angle = _interpolate_angles(self.mjd, _df)
 			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
@@ -1541,20 +1541,31 @@ class tessreduce():
 
 		"""
 
+		from .helpers import _shift_one, _shift_ref_one
 		shifted = self.flux.copy()
 		nans = ~np.isfinite(shifted)
 		shifted[nans] = 0.
 		if median:
-			for i in range(len(shifted)):
-				if np.nansum(abs(shifted[i])) > 0:
-					shifted[i] = shift(self.ref,[-self.shift[i,1],-self.shift[i,0]], mode='nearest',order=5)
+			if self.parallel:
+				result = Parallel(n_jobs=self.num_cores)(
+					delayed(_shift_ref_one)(self.ref, shifted[i], self.shift[i])
+					for i in range(len(shifted)))
+				shifted = np.array(result)
+			else:
+				for i in range(len(shifted)):
+					shifted[i] = _shift_ref_one(self.ref, shifted[i], self.shift[i])
 			self.flux -= shifted
 
 		else:
-			for i in range(len(shifted)):
-				if np.nansum(abs(shifted[i])) > 0:
-					shifted[i] = shift(shifted[i],[self.shift[i,0],self.shift[i,1]],mode='nearest',order=5)#mode='constant',cval=np.nan)
-			self.flux = shifted
+			if self.parallel:
+				result = Parallel(n_jobs=self.num_cores)(
+					delayed(_shift_one)(shifted[i], self.shift[i])
+					for i in range(len(shifted)))
+				self.flux = np.array(result)
+			else:
+				for i in range(len(shifted)):
+					shifted[i] = _shift_one(shifted[i], self.shift[i])
+				self.flux = shifted
 		
 	def bin_data(self,lc=None,time_bin=6/24,frames = None):
 		"""

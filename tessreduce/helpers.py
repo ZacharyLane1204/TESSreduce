@@ -166,6 +166,16 @@ def unknown_mask(image):
 	return mask
 
 
+def _shift_one(frame, s):
+	if np.nansum(abs(frame)) > 0:
+		return shift(frame, [s[0], s[1]], mode='nearest', order=5)
+	return frame
+
+def _shift_ref_one(ref, frame_for_check, s):
+	if np.nansum(abs(frame_for_check)) > 0:
+		return shift(ref, [-s[1], -s[0]], mode='nearest', order=5)
+	return frame_for_check
+
 def parallel_bkg3(data,mask):
 	data = deepcopy(data)
 	data[mask] = np.nan
@@ -1104,20 +1114,27 @@ def Extract_fits(pixelfile):
 		print('OSError ',pixelfile)
 		return
 
-def regional_stats_mask(image,size=90,sigma=3,iters=10):
+def _clip_region(image, rx, ry, sigma, iters):
+	m, me, s = sigma_clipped_stats(image[ry, rx], maxiters=iters)
+	cut = (image[rx, ry] >= me + sigma * s) | (image[rx, ry] <= me - sigma * s)
+	return rx[cut], ry[cut]
+
+def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1):
 	if size < 30:
 		print('!!! Region size is small !!!')
 	sx, sy = image.shape
 	X, Y = np.ogrid[0:sx, 0:sy]
-	regions = sy//size * (X//size) + Y//size
-	max_reg = np.max(regions)
+	regions = sy // size * (X // size) + Y // size
+	max_reg = int(np.max(regions))
+
+	region_pixels = [np.where(regions == i) for i in range(max_reg + 1)]
 
 	clip = np.zeros_like(image)
-	for i in range(max_reg+1):
-		rx,ry = np.where(regions == i)
-		m,me, s = sigma_clipped_stats(image[ry,rx],maxiters=iters)
-		cut_ind = np.where((image[rx,ry] >= me+sigma*s) | (image[rx,ry] <= me-sigma*s))
-		clip[rx[cut_ind],ry[cut_ind]] = 1
+	results = Parallel(n_jobs=n_jobs)(
+		delayed(_clip_region)(image, rx, ry, sigma, iters)
+		for rx, ry in region_pixels)
+	for rx_cut, ry_cut in results:
+		clip[rx_cut, ry_cut] = 1
 	return clip
 
 
@@ -1201,63 +1218,59 @@ def grad_clip_fill_bkg(bkg,sigma=3,max_size=1000):
 	ap = (abs(a) - a_med) > 3*a_std
 	ap = fftconvolve(ap,np.ones((3,3)),mode='same') > 0.8
 
-	b_labeled, b_objects = label(bp) 
-	a_labeled, a_objects = label(ap) 
+	b_labeled, b_objects = label(bp)
+	a_labeled, a_objects = label(ap)
 
-	b_obj_size = []
-	for i in range(b_objects):
-		b_obj_size += [np.sum(b_labeled==i)]
-	b_obj_size = np.array(b_obj_size)
+	# Component sizes via bincount (preserves original loop range 0..n_objects-1)
+	b_obj_size = np.bincount(b_labeled.ravel(), minlength=b_objects + 1)[:b_objects]
+	a_obj_size = np.bincount(a_labeled.ravel(), minlength=a_objects + 1)[:a_objects]
 
-	a_obj_size = []
-	for i in range(a_objects):
-		a_obj_size += [np.sum(a_labeled==i)]
-	a_obj_size = np.array(a_obj_size)
+	# Zero out components outside the valid size range
+	bad_a = np.where((a_obj_size >= max_size) | (a_obj_size <= 9))[0]
+	if len(bad_a) > 0:
+		a_labeled[np.isin(a_labeled, bad_a)] = 0
 
-	for i in range(a_objects):
-		if (a_obj_size[i] >= max_size) | (a_obj_size[i] <= 9):
-			a_labeled[a_labeled==i] = 0
+	bad_b = np.where((b_obj_size >= max_size) | (b_obj_size <= 9))[0]
+	if len(bad_b) > 0:
+		b_labeled[np.isin(b_labeled, bad_b)] = 0
 
-	for i in range(b_objects):
-		if (b_obj_size[i] >= max_size) | (b_obj_size[i] <= 9):
-			b_labeled[b_labeled==i] = 0
-			
-			
-	overlap = (a_labeled>0) & (b_labeled>0)
-	y,x = np.where(overlap)
+	overlap = (a_labeled > 0) & (b_labeled > 0)
+	y, x = np.where(overlap)
 
+	good_a = np.unique(a_labeled[y, x])
+	good_b = np.unique(b_labeled[y, x])
 
-	good_a = np.unique(a_labeled[y,x])
-	good_b = np.unique(b_labeled[y,x])
+	# Overlap ratios via bincount — counts per label, then fraction overlapping
+	_a_max = int(a_labeled.max()) + 1 if a_labeled.max() > 0 else 1
+	_b_max = int(b_labeled.max()) + 1 if b_labeled.max() > 0 else 1
+	a_lab_flat = a_labeled.ravel()
+	b_lab_flat = b_labeled.ravel()
+	ov_flat = overlap.ravel().astype(float)
 
-	a_ratio = []
-	for ind in good_a:
-		eh = a_labeled == ind
-		eh2 = eh * overlap
-		ratio = np.sum(eh2) / np.sum(eh)
-		a_ratio += [ratio]
-	a_ratio = np.array(a_ratio)
-		
-		
-	b_ratio = []
-	for ind in good_b:
-		eh = b_labeled == ind 
-		eh2 = eh * overlap
-		ratio = np.sum(eh2) / np.sum(eh)
-		b_ratio += [ratio]
-	b_ratio = np.array(b_ratio)
+	a_sizes = np.bincount(a_lab_flat, minlength=_a_max)
+	a_overlap_counts = np.bincount(a_lab_flat, weights=ov_flat, minlength=_a_max)
+	a_ratio = a_overlap_counts[good_a] / np.maximum(a_sizes[good_a], 1)
 
+	b_sizes = np.bincount(b_lab_flat, minlength=_b_max)
+	b_overlap_counts = np.bincount(b_lab_flat, weights=ov_flat, minlength=_b_max)
+	b_ratio = b_overlap_counts[good_b] / np.maximum(b_sizes[good_b], 1)
 
-	for i in good_a[a_ratio<0.2]: 
-		a_labeled[a_labeled==i] = 0
-	for i in good_b[b_ratio<0.2]: 
-		b_labeled[b_labeled==i] = 0
+	suppress_a = good_a[a_ratio < 0.2]
+	if len(suppress_a) > 0:
+		a_labeled[np.isin(a_labeled, suppress_a)] = 0
+
+	suppress_b = good_b[b_ratio < 0.2]
+	if len(suppress_b) > 0:
+		b_labeled[np.isin(b_labeled, suppress_b)] = 0
+
 	c = (a_labeled + b_labeled) > 0
 
-	c_labeled, c_objects = label(c==0) 
-	for i in range(c_objects):
-		if np.sum(c_labeled==i) < 10:
-			c[c_labeled==i] = 1
+	c_labeled, c_objects = label(c == 0)
+	if c_objects > 0:
+		c_sizes = np.bincount(c_labeled.ravel(), minlength=c_objects + 1)[:c_objects]
+		small = np.where(c_sizes < 10)[0]
+		if len(small) > 0:
+			c[np.isin(c_labeled, small)] = 1
 	
 	#points = fftconvolve(c,np.ones((5,5)),mode='same')
 	points = c>0#oints > 0.8
@@ -1323,29 +1336,30 @@ def fit_strap(data,mask):
 			p[np.isnan(p)] = p2[np.isnan(p)]
 	return p
 
-def parallel_strap_fit(frame,frame_bkg,frame_err,mask,repeats=3,tol=3):
+def _strap_fit_col(col_data, norm_col):
+	d = abs(np.gradient(col_data))
+	m, med, std = sigma_clipped_stats(d, maxiters=10)
+	nm = (d > med + std) * 1
+	nm = np.convolve(nm, np.ones(3), mode='same')
+	nm = (nm == 0)
+	q = fit_strap(norm_col, nm)
+	if len(col_data) > 110:
+		q = savgol_filter(q, 101, 1)
+	else:
+		q[:] = np.nanmedian(q)
+	return q
+
+def parallel_strap_fit(frame, frame_bkg, frame_err, mask, repeats=3, tol=3, n_jobs=1):
 	norm = frame / frame_bkg
-	sind = np.where(np.nansum(mask,axis=0)>0)[0]
+	sind = np.where(np.nansum(mask, axis=0) > 0)[0]
 	qe = np.ones_like(frame)
-	for i in sind:
-		y = frame[:,i]
-		d = abs(np.gradient(y))
-		m, med, std = sigma_clipped_stats(d,maxiters=10)
-		nm = (d > med + std) * 1
-		nm = np.convolve(nm,np.ones(3),mode='same')
-		nm = (nm == 0)
-		#for r in range(repeats):
-		q = fit_strap(norm[:,i],nm)
-		#q /= frame_bkg[:,i]
-		if len(y) > 110:
-			q = savgol_filter(q,101,1)
-		else:
-			mq = np.nanmedian(q)
-			q[:] = mq
-
-		qe[:,i] = q
-
-	#qe[:,np.nanmean((qe-1),axis=) < 5e-3] = 1
+	if len(sind) == 0:
+		return qe
+	results = Parallel(n_jobs=n_jobs)(
+		delayed(_strap_fit_col)(frame[:, i], norm[:, i])
+		for i in sind)
+	for col, q in zip(sind, results):
+		qe[:, col] = q
 	return qe
 
 
@@ -1520,10 +1534,10 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 				if ap_mask.sum() == 0 or snr_map[ap_mask].mean() <= sep_snr_thresh:
 					continue
 				cx, cy = obj['x'], obj['y']
+				dist = np.sqrt((xx - cx)**2 + (yy - cy)**2)
 				true_r = None
 				for r in range(2, 20):
-					ann = (np.sqrt((xx - cx)**2 + (yy - cy)**2) >= r - 0.5) & \
-						  (np.sqrt((xx - cx)**2 + (yy - cy)**2) < r + 0.5)
+					ann = (dist >= r - 0.5) & (dist < r + 0.5)
 					if ann.sum() == 0:
 						break
 					if lap_sub[ann].mean() < noise:
@@ -1533,8 +1547,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 					true_r = 19
 				if true_r is None or true_r < 2 or true_r > 5:
 					continue
-				circ = np.sqrt((xx - cx)**2 + (yy - cy)**2) <= true_r
-				sep_mask |= circ
+				sep_mask |= dist <= true_r
 
 			lap_med = np.nanmedian(lap_abs)
 			lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
@@ -1547,15 +1560,18 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 				edge_border[0, :] = True; edge_border[-1, :] = True
 				edge_border[:, 0] = True; edge_border[:, -1] = True
 				labeled, n_comp = label(flagged_coarse)
-				smooth_mask = np.zeros((NY, NX), dtype=bool)
-				for comp_id in range(1, n_comp + 1):
-					comp = labeled == comp_id
-					if (comp & edge_border).any() and not (comp & sep_mask).any():
-						smooth_mask |= comp
-					elif (comp & is_sharp).any() and (comp & sep_mask).any():
-						sharp_mask |= comp
-					else:
-						smooth_mask |= comp
+				if n_comp > 0:
+					lab_flat = labeled.ravel()
+					touches_edge = np.zeros(n_comp + 1, dtype=bool)
+					touches_sep_lbl = np.zeros(n_comp + 1, dtype=bool)
+					touches_sharp_lbl = np.zeros(n_comp + 1, dtype=bool)
+					np.bitwise_or.at(touches_edge, lab_flat, edge_border.ravel())
+					np.bitwise_or.at(touches_sep_lbl, lab_flat, sep_mask.ravel())
+					np.bitwise_or.at(touches_sharp_lbl, lab_flat, is_sharp.ravel())
+					# sharp: first condition False AND touches_sharp AND touches_sep
+					is_sharp_lbl = ~(touches_edge & ~touches_sep_lbl) & touches_sharp_lbl & touches_sep_lbl
+					is_sharp_lbl[0] = False
+					sharp_mask |= is_sharp_lbl[labeled]
 			else:
 				sharp_mask |= flagged_coarse & is_sharp
 
@@ -1618,11 +1634,12 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
 		high_lap = lap_abs > lap_med + bad_bkg_sigma * 1.4826 * lap_mad
 		labeled_lap, n_lap = label(high_lap)
-		bad_bkg_mask = np.zeros((NY, NX), dtype=bool)
-		for cid in range(1, n_lap + 1):
-			comp = labeled_lap == cid
-			if comp.sum() >= bad_bkg_min_area:
-				bad_bkg_mask |= comp
+		if n_lap > 0:
+			areas = np.bincount(labeled_lap.ravel(), minlength=n_lap + 1)
+			large = np.flatnonzero(areas[1:] >= bad_bkg_min_area) + 1
+			bad_bkg_mask = np.isin(labeled_lap, large) if len(large) > 0 else np.zeros((NY, NX), dtype=bool)
+		else:
+			bad_bkg_mask = np.zeros((NY, NX), dtype=bool)
 
 		return fixed, excess, sharp_mask, bad_bkg_mask
 
@@ -1663,11 +1680,14 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 				lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
 				is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
 				labeled_c, n_c = label(flagged)
-				for cid in range(1, n_c + 1):
-					comp = labeled_c == cid
-					n_sp = (comp & is_sharp).sum()
-					if n_sp / comp.sum() >= 0.3:
-						corr[comp] = 0.0
+				if n_c > 0:
+					lab_flat = labeled_c.ravel()
+					comp_sizes = np.bincount(lab_flat, minlength=n_c + 1)
+					sharp_counts = np.bincount(lab_flat, weights=is_sharp.ravel(), minlength=n_c + 1)
+					sharp_frac = sharp_counts / np.maximum(comp_sizes, 1)
+					suppress = np.flatnonzero(sharp_frac[1:] >= 0.3) + 1
+					if len(suppress) > 0:
+						corr[np.isin(labeled_c, suppress)] = 0.0
 			return corr
 
 		residuals = flux - bkg_fixed
@@ -1776,7 +1796,22 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 	return result, segments, orbit_refs
 
 
-def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None):
+def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask_i, gauss_kernel):
+	_, _, scale = sigma_clipped_stats(resid_prev_i)
+	w = np.clip(delta_i / (sigma * scale + 1e-10), 0, 1)
+	w_zero = (w == 0)
+	if w_zero.any():
+		w_med = median_filter(w_zero.astype(float), size=7)
+		diff_mask = w_zero & ~(w_med > 0.5)
+		w[w_med > 0.5] = 0
+		if diff_mask.any():
+			w[diff_mask] = np.nan
+			w = interpolate_replace_nans(w, gauss_kernel)
+	if sharp_mask_i is not None:
+		w[sharp_mask_i] = 0.0
+	return (1 - w) * bkg_new_i + w * bkg_prev_i
+
+def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None, n_jobs=1):
 	"""Per-pixel blend bkg_new toward bkg_prev based on residual quality.
 
 	For each pixel, compares |flux - bkg_new| vs |flux - bkg_prev|. Where
@@ -1803,25 +1838,15 @@ def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=Non
 	flux = np.array(flux)
 	resid_new = np.abs(flux - bkg_new)
 	resid_prev = np.abs(flux - bkg_prev)
-	delta = resid_new - resid_prev  # positive = bkg_new is worse
-	_gauss_kernel = Gaussian2DKernel(1.0)
+	delta = resid_new - resid_prev
+	gauss_kernel = Gaussian2DKernel(1.0)
+	T = bkg_new.shape[0]
 
-	out = bkg_new.copy()
-	for i in range(bkg_new.shape[0]):
-		_, _, scale = sigma_clipped_stats(resid_prev[i])
-		w = np.clip(delta[i] / (sigma * scale + 1e-10), 0, 1)
+	sharp_list = [sharp_masks[i] if sharp_masks is not None else None for i in range(T)]
 
-		w_zero = (w == 0)
-		if w_zero.any():
-			w_med = median_filter(w_zero.astype(float), size=7)
-			diff_mask = w_zero & ~(w_med > 0.5)
-			w[w_med > 0.5] = 0
-			if diff_mask.any():
-				w[diff_mask] = np.nan
-				w = interpolate_replace_nans(w, _gauss_kernel)
-
-		if sharp_masks is not None:
-			w[sharp_masks[i]] = 0.0
-		out[i] = (1 - w) * bkg_new[i] + w * bkg_prev[i]
-	return out
+	results = Parallel(n_jobs=n_jobs)(
+		delayed(_blend_frame)(bkg_new[i], bkg_prev[i], delta[i], resid_prev[i],
+							  sigma, sharp_list[i], gauss_kernel)
+		for i in range(T))
+	return np.array(results)
 

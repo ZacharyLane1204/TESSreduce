@@ -336,7 +336,8 @@ class TESSBackgroundSeparator:
         )  # (T,)
 
         ceiling = self.flux + (k * frame_noise)[:, np.newaxis, np.newaxis]
-        yx_all = np.array([[y, x] for y in range(self._X) for x in range(self._Y)])
+        _yy, _xx = np.mgrid[:self._X, :self._Y]
+        yx_all = np.column_stack([_yy.ravel(), _xx.ravel()])
         for t in range(self._T):
             bad = bkg[t] > ceiling[t]
             if not bad.any():
@@ -705,7 +706,8 @@ class TESSBackgroundSeparator:
         noise = 1.4826 * mad  # (X, Y)
         threshold = -noise_floor * noise  # (X, Y) — always <= 0
 
-        yx_all = np.array([[y, x] for y in range(self._X) for x in range(self._Y)])
+        _yy, _xx = np.mgrid[:self._X, :self._Y]
+        yx_all = np.column_stack([_yy.ravel(), _xx.ravel()])
 
         for t in range(self._T):
             frame = self.flux[t].copy()
