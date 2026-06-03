@@ -123,7 +123,7 @@ def correct_straps(Image,mask,av_size=5,parallel=True):
         if parallel:
             num_cores = multiprocessing.cpu_count()
             x = np.arange(0,len(breaks),dtype=int)
-            qe = np.array(Parallel(n_jobs=num_cores)(delayed(calc_strap_factor)(i,breaks,size,av_size,normals,data) for i in x))
+            qe = np.array(Parallel(n_jobs=num_cores, prefer="threads")(delayed(calc_strap_factor)(i,breaks,size,av_size,normals,data) for i in x))
             qe = np.nanmedian(qe,axis=0)
             qe[np.isnan(qe)] = 1   
         else:

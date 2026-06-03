@@ -80,7 +80,7 @@ class Background():
 
 		if self.parallel:
 			num_cores = multiprocessing.cpu_count()
-			bkg_smth = Parallel(n_jobs=num_cores)(
+			bkg_smth = Parallel(n_jobs=num_cores, prefer="threads")(
 				delayed(Smooth_bkg)(frame) for frame in flux * m)
 		else:
 			bkg_smth = np.zeros_like(flux) * np.nan

@@ -236,7 +236,7 @@ def adaptive_medfilt_3d(
                 dev[s:e] = median_filter(diff, size=(dw, 1, 1), mode='reflect')
             return dev
 
-        all_devs = Parallel(n_jobs=n_jobs)(delayed(_compute_dev)(cw) for cw in scales)
+        all_devs = Parallel(n_jobs=n_jobs, prefer="threads")(delayed(_compute_dev)(cw) for cw in scales)
 
         _frame_mean = data_metric.mean(axis=(1, 2))
         _clipped = _frame_mean[np.isfinite(_frame_mean)]
@@ -280,7 +280,7 @@ def adaptive_medfilt_3d(
                 norm_scale = norm_scale * bright_mask
             return norm_scale
 
-        scale_norms = Parallel(n_jobs=n_jobs)(
+        scale_norms = Parallel(n_jobs=n_jobs, prefer="threads")(
             delayed(_compute_norm)((i, dev)) for i, dev in enumerate(all_devs)
         )
 
@@ -377,7 +377,7 @@ def adaptive_medfilt_3d(
         def _smooth_seg(w, seg=seg_data):
             return w, median_filter(seg, size=(w, 1, 1), mode='reflect')
 
-        for w, smoothed_w in Parallel(n_jobs=n_jobs)(delayed(_smooth_seg)(w) for w in seg_levels):
+        for w, smoothed_w in Parallel(n_jobs=n_jobs, prefer="threads")(delayed(_smooth_seg)(w) for w in seg_levels):
             result[s:e][seg_wins == w] = smoothed_w[seg_wins == w]
 
     if sigma_clip is not None:

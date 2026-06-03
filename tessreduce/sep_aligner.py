@@ -703,7 +703,7 @@ class SepAligner:
             self._sub_ref, cores, positions, np.asarray(weights), p['core_half'])
 
         results = Parallel(n_jobs=self.n_jobs, verbose=verbose,
-                           backend='loky')(
+                           prefer="threads")(
             delayed(_align_one_frame)(
                 t, self.flux[t],
                 ref_comp, w_cols,
