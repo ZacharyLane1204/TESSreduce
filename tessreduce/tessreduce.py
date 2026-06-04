@@ -33,14 +33,20 @@ def _available_cores():
 	slurm = os.environ.get('SLURM_CPUS_PER_TASK')
 	if slurm is not None:
 		try:
-			return int(slurm)
+			n = int(slurm)
+			print(f'[tessreduce] _available_cores: SLURM_CPUS_PER_TASK={slurm} → {n} cores')
+			return n
 		except ValueError:
 			pass
 	try:
-		return len(os.sched_getaffinity(0))
+		n = len(os.sched_getaffinity(0))
+		print(f'[tessreduce] _available_cores: sched_getaffinity → {n} cores')
+		return n
 	except AttributeError:
 		pass
-	return multiprocessing.cpu_count()
+	n = multiprocessing.cpu_count()
+	print(f'[tessreduce] _available_cores: cpu_count fallback → {n} cores')
+	return n
 
 from .catalog_tools import *
 from .calibration_tools import *
@@ -244,6 +250,13 @@ class tessreduce():
 		self._smooth_motion = smooth_motion
 		self._timing = timing
 		self._cache_path = None
+
+		# SLURM environment diagnostics
+		_slurm_vars = ['SLURM_CPUS_PER_TASK', 'SLURM_NTASKS', 'SLURM_NTASKS_PER_NODE',
+					   'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']
+		_slurm_env = {k: os.environ.get(k, 'not set') for k in _slurm_vars}
+		print(f'[tessreduce] SLURM env: {_slurm_env}')
+		print(f'[tessreduce] num_cores resolved to: {self.num_cores}')
 
 		# Offline Paths 
 		if catalogue_path is None:
