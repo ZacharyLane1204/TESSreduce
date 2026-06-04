@@ -68,6 +68,22 @@ pd.options.mode.chained_assignment = None
 # set the package directory so we can load in a file later
 package_directory = os.path.dirname(os.path.abspath(__file__)) + '/'
 
+def _fit_bkg_surface_frame(residual, exclude_mask, box_size, filter_size, sigma):
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	sc = SigmaClip(sigma=sigma, maxiters=5)
+	finite_vals = residual[~exclude_mask & np.isfinite(residual)]
+	med = np.nanmedian(finite_vals)
+	std = np.nanstd(finite_vals)
+	transient_mask = exclude_mask | (residual > med + 5 * std)
+	try:
+		b = Background2D(residual, box_size=box_size, filter_size=filter_size,
+						 sigma_clip=sc, bkg_estimator=MedianBackground(),
+						 mask=transient_mask, fill_value=0.0)
+		return b.background
+	except Exception:
+		return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+
 fig_width_pt = 240.0  # Get this from LaTeX using \showthe\columnwidth
 inches_per_pt = 1.0/72.27				# Convert pt to inches
 golden_mean = (np.sqrt(5)-1.0)/2.0		 # Aesthetic ratio
@@ -105,35 +121,17 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 	from astropy.stats import SigmaClip
 	from joblib import Parallel, delayed
 
-	sc = SigmaClip(sigma=sigma, maxiters=5)
-	estimator = MedianBackground()
-
 	bkgmask = np.asarray(bkgmask)
 	if bkgmask.ndim == 3:
 		exclude_mask = np.any(np.isnan(bkgmask), axis=0)
 	else:
 		exclude_mask = np.isnan(bkgmask)
 
-	def _fit_frame(residual):
-		finite_vals = residual[~exclude_mask & np.isfinite(residual)]
-		med = np.nanmedian(finite_vals)
-		std = np.nanstd(finite_vals)
-		transient_mask = exclude_mask | (residual > med + 5 * std)
-		try:
-			b = Background2D(residual,
-							box_size=box_size,
-							filter_size=filter_size,
-							sigma_clip=sc,
-							bkg_estimator=estimator,
-							mask=transient_mask,
-							fill_value=0.0)
-			return b.background
-		except Exception:
-			return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
-
 	n_jobs = _available_cores()
 	residuals = flux - bkg
-	corrections = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(delayed(_fit_frame)(residuals[i]) for i in range(flux.shape[0]))
+	corrections = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+		delayed(_fit_bkg_surface_frame)(residuals[i], exclude_mask, box_size, filter_size, sigma)
+		for i in range(flux.shape[0]))
 	bkg += np.array(corrections)
 
 	return bkg
