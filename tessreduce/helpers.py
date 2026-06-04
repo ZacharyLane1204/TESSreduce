@@ -1789,7 +1789,7 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 	return result, segments, orbit_refs
 
 
-def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask_i, gauss_kernel):
+def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask_i):
 	_, _, scale = sigma_clipped_stats(resid_prev_i)
 	w = np.clip(delta_i / (sigma * scale + 1e-10), 0, 1)
 	w_zero = (w == 0)
@@ -1799,7 +1799,7 @@ def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask
 		w[w_med > 0.5] = 0
 		if diff_mask.any():
 			w[diff_mask] = np.nan
-			w = interpolate_replace_nans(w, gauss_kernel)
+			w = interpolate_replace_nans(w, Gaussian2DKernel(1.0))
 	if sharp_mask_i is not None:
 		w[sharp_mask_i] = 0.0
 	return (1 - w) * bkg_new_i + w * bkg_prev_i
@@ -1832,14 +1832,12 @@ def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=Non
 	resid_new = np.abs(flux - bkg_new)
 	resid_prev = np.abs(flux - bkg_prev)
 	delta = resid_new - resid_prev
-	gauss_kernel = Gaussian2DKernel(1.0)
 	T = bkg_new.shape[0]
-
 	sharp_list = [sharp_masks[i] if sharp_masks is not None else None for i in range(T)]
 
 	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
 		delayed(_blend_frame)(bkg_new[i], bkg_prev[i], delta[i], resid_prev[i],
-							  sigma, sharp_list[i], gauss_kernel)
+							  sigma, sharp_list[i])
 		for i in range(T))
 	return np.array(results)
 
