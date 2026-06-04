@@ -197,7 +197,7 @@ def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, 
 	from astropy.stats import SigmaClip
 	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
 	estimator = MedianBackground()
-	return np.array(Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+	return np.array(Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
 		delayed(_background2d_frame)(frame, box_size, filter_size, sc, estimator, mask)
 		for frame in cube))
 
@@ -1130,7 +1130,7 @@ def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1):
 	region_pixels = [np.where(regions == i) for i in range(max_reg + 1)]
 
 	clip = np.zeros_like(image)
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
 		delayed(_clip_region)(image, rx, ry, sigma, iters)
 		for rx, ry in region_pixels)
 	for rx_cut, ry_cut in results:
@@ -1355,7 +1355,7 @@ def parallel_strap_fit(frame, frame_bkg, frame_err, mask, repeats=3, tol=3, n_jo
 	qe = np.ones_like(frame)
 	if len(sind) == 0:
 		return qe
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
 		delayed(_strap_fit_col)(frame[:, i], norm[:, i])
 		for i in sind)
 	for col, q in zip(sind, results):
@@ -1844,7 +1844,7 @@ def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=Non
 
 	sharp_list = [sharp_masks[i] if sharp_masks is not None else None for i in range(T)]
 
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
+	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
 		delayed(_blend_frame)(bkg_new[i], bkg_prev[i], delta[i], resid_prev[i],
 							  sigma, sharp_list[i], gauss_kernel)
 		for i in range(T))
