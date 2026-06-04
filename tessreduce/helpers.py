@@ -182,23 +182,21 @@ def parallel_bkg3(data,mask):
 	estimate = inpaint.inpaint_biharmonic(data,mask)
 	return estimate
 
-def _background2d_frame(frame, box_size, filter_size, sc, estimator, mask=None):
-	from photutils.background import Background2D
+def _background2d_frame(frame, box_size, filter_size, sigma, maxiters, mask=None):
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
 	try:
 		return Background2D(frame, box_size=box_size, filter_size=filter_size,
-							sigma_clip=sc, bkg_estimator=estimator,
+							sigma_clip=sc, bkg_estimator=MedianBackground(),
 							mask=mask, fill_value=0.0,
 							exclude_percentile=50).background
 	except Exception:
 		return np.full_like(frame, np.nanmedian(frame))
 
 def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None):
-	from photutils.background import MedianBackground
-	from astropy.stats import SigmaClip
-	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
-	estimator = MedianBackground()
 	return np.array(Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
-		delayed(_background2d_frame)(frame, box_size, filter_size, sc, estimator, mask)
+		delayed(_background2d_frame)(frame, box_size, filter_size, sigma, maxiters, mask)
 		for frame in cube))
 
 def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
