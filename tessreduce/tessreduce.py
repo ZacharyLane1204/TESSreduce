@@ -789,8 +789,10 @@ class tessreduce():
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
 				_t = time.perf_counter()
+				print('smooth background...')
 				bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				_times['initial smooth background'] = time.perf_counter() - _t
+				print('smooth background done')
 				if rerun_negative:
 					_t = time.perf_counter()
 					if self._use_error_image:
@@ -811,8 +813,10 @@ class tessreduce():
 					else:
 						m[over_sub] = 1
 					self._bkgmask = m
+					print('smooth background rerun (negative correction)...')
 					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
+					print('smooth background rerun done')
 
 
 				if rerun_diff:
@@ -864,6 +868,7 @@ class tessreduce():
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
 					bkg_s1 = np.array(bkg_smth)
+					print('smooth background rerun (residual surface)...')
 					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
 						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores)
@@ -896,6 +901,7 @@ class tessreduce():
 			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
 		else:
 			_high_bkg_frames = _bkg_median > 300.0
+		print('fixing background anomalies...')
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=deepcopy(self.flux),
 											bkg_prev=bkg_pre_fix if blend_dynamic else None,
@@ -904,8 +910,10 @@ class tessreduce():
 											high_bkg_frames=_high_bkg_frames,
 											n_jobs=self.num_cores)
 		_times['anomaly fixing'] = time.perf_counter() - _t
+		print('fixing background anomalies done')
 
 		_t = time.perf_counter()
+		print('adaptive temporal smoothing...')
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores)
@@ -913,6 +921,7 @@ class tessreduce():
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 		_times['adaptive temporal smoothing'] = time.perf_counter() - _t
+		print('adaptive temporal smoothing done')
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if rerun_diff:
@@ -2680,14 +2689,14 @@ class tessreduce():
 			
 			# calculate the background
 			#self.flux -= self.ref
+			print('background pass 1...')
 			_t = time.perf_counter()
 			self.background(rerun_negative=True)
-			#self.flux += self.ref
 			self.flux -= self.bkg
 			_times['background (pass 1)'] = time.perf_counter() - _t
+			print('background pass 1 done')
 
 			if np.isnan(self.bkg).all():
-				# check to see if the background worked
 				raise ValueError('bkg all nans')
 			
 			# flux = strip_units(self.flux)
@@ -2740,7 +2749,8 @@ class tessreduce():
 			else:
 				self.shift = np.zeros((len(self.flux),2))
 			_times['alignment'] = time.perf_counter() - _t
-			
+			print('alignment done')
+
 			if not self.diff:
 				if self.align:
 					_t = time.perf_counter()
@@ -2800,27 +2810,24 @@ class tessreduce():
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
 				_times['difference imaging setup'] = time.perf_counter() - _t
+				print('diff setup done')
 
-				if self.verbose > 0:
-					print('remade mask')
-				# background
-				if self.verbose > 0:
-					print('background')
 				self.bkg_orig = deepcopy(self.bkg)
+				print('background pass 2...')
 				_t = time.perf_counter()
 				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,
 								gauss_smooth=self._bkg_gauss_sigma,interpolate=False,
 								rerun_negative=False,rerun_diff=True,blend_dynamic=True)
-				# self._grad_bkg_clip()
 				self.flux -= self.bkg
 				_times['background (pass 2)'] = time.perf_counter() - _t
+				print('background pass 2 done')
 
 				if self.corr_correction:
 					_t = time.perf_counter()
-					if self.verbose > 0:
-						print('background correlation correction')
+					print('correlation correction...')
 					self.correlation_corrector()
 					_times['correlation correction'] = time.perf_counter() - _t
+					print('correlation correction done')
 				if self.kernel_match:
 					self.kernel_matching(diff=self.diff)
 					if self.verbose > 0:
