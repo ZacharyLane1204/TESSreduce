@@ -836,13 +836,17 @@ class tessreduce():
 
 					estimator = MedianBackground()
 					sc = SigmaClip(sigma=5, maxiters=5)
-					b = Background2D(std,
-									box_size=5,
-									filter_size=3,
-									sigma_clip=sc,
-									bkg_estimator=estimator,
-									fill_value=0.0)
-					std_sub = std - b.background
+					try:
+						b = Background2D(std,
+										box_size=5,
+										filter_size=3,
+										sigma_clip=sc,
+										bkg_estimator=estimator,
+										exclude_percentile=50,
+										fill_value=0.0)
+						std_sub = std - b.background
+					except ValueError:
+						std_sub = std
 					_,smed,sstd = sigma_clipped_stats(std_sub)
 					resid_mask = (std_sub > smed + 3*sstd) * 1.0
 					ny, nx = resid_mask.shape
