@@ -270,8 +270,9 @@ def PS1_to_TESS_mag(PS1,ebv = 0):
 	z = mag2flux(PS1.zmag.values - ez,zp)
 	y = mag2flux(PS1.ymag.values - ey,zp)
 	
-	cr = 0.25582823; ci = 0.27609407; cz = 0.35809516
-	cy = 0.11244277; cp = 0.00049096
+	# re-derived via calibrimbore (sauron(band='tess.dat',system='ps1',gr_lims=[-.5,.8]))
+	cr = 0.23693349; ci = 0.34742086; cz = 0.28054228
+	cy = 0.13630491; cp = 0.00036188
 
 	t = (cr*r + ci*i + cz*z + cy*y)*(g/i)**cp
 	t = -2.5*np.log10(t) + zp + et
@@ -295,8 +296,9 @@ def SM_to_TESS_mag(SM,ebv = 0):
 	i = mag2flux(SM.imag.values - ei,zp)
 	z = mag2flux(SM.zmag.values - ez,zp)
 	
-	cr = 0.25825435; ci = 0.35298213
-	cz = 0.39388206; cp = -0.00170817
+	# re-derived via calibrimbore (sauron(band='tess.dat',system='skymapper',gr_lims=[-.5,.8]))
+	cr = 0.25323566; ci = 0.42107837
+	cz = 0.32697125; cp = -0.01408441
 
 	t = (cr*r + ci*i + cz*z)*(g/i)**cp
 	t = -2.5*np.log10(t) + zp + et
