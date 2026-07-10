@@ -34,20 +34,20 @@ def _available_cores(verbose=1):
 	if slurm is not None:
 		try:
 			n = int(slurm)
-			if verbose > 0:
+			if verbose >= 3:
 				print(f'[tessreduce] _available_cores: SLURM_CPUS_PER_TASK={slurm} → {n} cores')
 			return n
 		except ValueError:
 			pass
 	try:
 		n = len(os.sched_getaffinity(0))
-		if verbose > 0:
+		if verbose >= 3:
 			print(f'[tessreduce] _available_cores: sched_getaffinity → {n} cores')
 		return n
 	except AttributeError:
 		pass
 	n = multiprocessing.cpu_count()
-	if verbose > 0:
+	if verbose >= 3:
 		print(f'[tessreduce] _available_cores: cpu_count fallback → {n} cores')
 	return n
 
@@ -211,8 +211,9 @@ class tessreduce():
 		prf_path : str, optional
 			Path to local TESS PRF files. The default is currently a specific location on the OzStar supercomputer.
 		verbose : int, optional
-			Controls the level of verbosity. 0 is silent, 1 (default) prints reduction stage
-			announcements, 2 additionally prints joblib's per-task Parallel output.
+			Controls the level of verbosity. 0 is silent, 1 (default) prints top-level reduction
+			stage announcements, 2 additionally prints background() sub-step announcements (with
+			per-step timing), 3 additionally prints joblib's per-task Parallel output.
 		timing : bool, optional
 			Print execution time reports for major pipeline blocks in background() and reduce(). The default is False.
 
@@ -259,7 +260,7 @@ class tessreduce():
 		self._cache_path = None
 
 		# SLURM environment diagnostics
-		if verbose > 0:
+		if verbose >= 3:
 			_slurm_vars = ['SLURM_CPUS_PER_TASK', 'SLURM_NTASKS', 'SLURM_NTASKS_PER_NODE',
 						   'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']
 			_slurm_env = {k: os.environ.get(k, 'not set') for k in _slurm_vars}
@@ -371,8 +372,8 @@ class tessreduce():
 
 	@property
 	def _joblib_verbose(self):
-		"""joblib Parallel verbosity: 0 unless self.verbose requests joblib output (>=2)."""
-		return 1 if self.verbose >= 2 else 0
+		"""joblib Parallel verbosity: 0 unless self.verbose requests joblib output (>=3)."""
+		return 1 if self.verbose >= 3 else 0
 
 	def check_coord(self):
 		"""
@@ -804,12 +805,12 @@ class tessreduce():
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
 				_t = time.perf_counter()
-				if self.verbose > 0:
+				if self.verbose >= 2:
 					print('smooth background...')
 				bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				_times['initial smooth background'] = time.perf_counter() - _t
-				if self.verbose > 0:
-					print('smooth background done')
+				if self.verbose >= 2:
+					print(f'smooth background done ({_times["initial smooth background"]:.2f}s)')
 				if rerun_negative:
 					_t = time.perf_counter()
 					if self._use_error_image:
@@ -830,12 +831,12 @@ class tessreduce():
 					else:
 						m[over_sub] = 1
 					self._bkgmask = m
-					if self.verbose > 0:
+					if self.verbose >= 2:
 						print('smooth background rerun (negative correction)...')
 					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
-					if self.verbose > 0:
-						print('smooth background rerun done')
+					if self.verbose >= 2:
+						print(f'smooth background rerun done ({_times["negative over-subtraction rerun"]:.2f}s)')
 
 				if rerun_diff:
 					_t = time.perf_counter()
@@ -890,12 +891,14 @@ class tessreduce():
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
 					bkg_s1 = np.array(bkg_smth)
-					if self.verbose > 0:
+					if self.verbose >= 2:
 						print('smooth background rerun (residual surface)...')
 					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
 						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 					_times['residual surface rerun'] = time.perf_counter() - _t
+					if self.verbose >= 2:
+						print(f'smooth background rerun (residual surface) done ({_times["residual surface rerun"]:.2f}s)')
 
 			else:
 				_t = time.perf_counter()
@@ -903,8 +906,7 @@ class tessreduce():
 					bkg_smth[i] = Smooth_bkg((flux*m)[i],0,interpolate)
 				_times['initial smooth background'] = time.perf_counter() - _t
 		else:
-			if self.verbose > 0:
-				print('Small tpf, using percentile cut background')
+			print('Small tpf, using percentile cut background')
 			self.small_background()
 			bkg_smth = self.bkg
 		
@@ -925,7 +927,7 @@ class tessreduce():
 			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
 		else:
 			_high_bkg_frames = _bkg_median > 300.0
-		if self.verbose > 0:
+		if self.verbose >= 2:
 			print('fixing background anomalies...')
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=deepcopy(self.flux),
@@ -935,11 +937,11 @@ class tessreduce():
 											high_bkg_frames=_high_bkg_frames,
 											n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 		_times['anomaly fixing'] = time.perf_counter() - _t
-		if self.verbose > 0:
-			print('fixing background anomalies done')
+		if self.verbose >= 2:
+			print(f'fixing background anomalies done ({_times["anomaly fixing"]:.2f}s)')
 
 		_t = time.perf_counter()
-		if self.verbose > 0:
+		if self.verbose >= 2:
 			print('adaptive temporal smoothing...')
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
@@ -948,8 +950,8 @@ class tessreduce():
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 		_times['adaptive temporal smoothing'] = time.perf_counter() - _t
-		if self.verbose > 0:
-			print('adaptive temporal smoothing done')
+		if self.verbose >= 2:
+			print(f'adaptive temporal smoothing done ({_times["adaptive temporal smoothing"]:.2f}s)')
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if rerun_diff:
@@ -2564,6 +2566,158 @@ class tessreduce():
 		return flux, eflux
 
 
+	def scene_photometry(self,xPix,yPix,size=9,bkg_poly_order=2,snap='ref',
+						  neighbours=True,neighbour_prior_mag_tol=0.5,
+						  include_psf_derivatives=True,diff=None):
+		"""
+		Scene-modelling PSF photometry.
+
+		Fits a fixed (or once-refined) position with a single vectorized linear
+		solve across the *entire* time series, using a 2D polynomial background
+		surface (instead of a flat constant) and optional PSF-derivative columns
+		that absorb poor difference-image subtraction residuals right at the
+		target position. This is an additional, much faster alternative to
+		psf_photometry() for the fixed/near-fixed position case -- it does not
+		replace psf_photometry(), whose per-frame position refit (snap='all')
+		still covers genuine per-frame motion that a fixed-basis linear model
+		cannot represent.
+
+		Parameters
+		----------
+		xPix, yPix : float
+			Pixel location of the target, in the same pixel frame used
+			elsewhere (e.g. psf_photometry, field_calibrate's catalogue col/row).
+		size : int, optional
+			Cutout side length in pixels (should be odd). The default is 9.
+		bkg_poly_order : int, optional
+			Order of the 2D polynomial background surface. 0 reproduces a flat
+			background. The default is 2.
+		snap : {'ref','brightest','fixed'}, optional
+			How the fixed position is chosen. 'ref' (default) refines position
+			once on the reference frame; 'brightest' refines on the highest
+			flux-weighted frame in the cutout; 'fixed' skips position
+			refinement entirely (uses (xPix,yPix) exactly).
+		neighbours : bool, optional
+			If True, nearby sources from the calibration catalogue (self.cat,
+			populated by field_calibrate()/field_calibrate_scene()) within the
+			cutout are modelled as extra PSF columns for deblending, with a
+			ridge prior pulling their fitted flux toward the catalogue-
+			predicted value (see neighbour_prior_mag_tol). If no calibration
+			has been run yet, neighbours are modelled unconstrained and a
+			warning is raised. The default is True.
+		neighbour_prior_mag_tol : float, optional
+			Tolerance (mag) controlling how strongly a neighbour's fitted flux
+			is pulled toward its catalogue-predicted value: smaller values pull
+			harder. The default is 0.5.
+		include_psf_derivatives : bool, optional
+			Add PSF spatial-derivative columns at the target position to absorb
+			sharp subtraction-residual structure from imperfect difference-image
+			alignment/kernel-matching. The default is True.
+		diff : bool, optional
+			If True use the already-differenced flux cube; if False add self.ref
+			back before extracting the cutout. Defaults to self.diff.
+
+		Returns
+		-------
+		flux, eflux : array_like
+			Flux and formal per-frame flux error, length = n frames.
+		"""
+		from . import scene_photom as sp
+
+		if diff is None:
+			diff = self.diff
+
+		xPix = int(np.round(xPix))
+		yPix = int(np.round(yPix))
+
+		col = self.tpf.column - int(self.size//2) + xPix + 45
+		row = self.tpf.row - int(self.size//2) + yPix + 1
+		col = int(np.clip(col,45,2090))
+		row = int(np.clip(row,10,2040))
+		prf = sp._prf_cache(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row,self._prf_path)
+
+		half = size // 2
+		if diff:
+			cutout = self.flux[:,yPix-half:yPix+half+1,xPix-half:xPix+half+1]
+		else:
+			cutout = (self.flux+self.ref)[:,yPix-half:yPix+half+1,xPix-half:xPix+half+1]
+
+		cent = (size-1) / 2.0
+
+		# -- position: fixed, or refined once on a single high-SNR frame -- #
+		if snap == 'ref':
+			ref_ind = self.ref_ind
+		elif snap == 'brightest':
+			weight = np.abs(np.nansum(cutout[:,half-1:half+2,half-1:half+2],axis=(1,2)))
+			weight[~np.isfinite(weight)] = 0
+			ref_ind = int(np.argmax(weight))
+		elif snap == 'fixed':
+			ref_ind = None
+		else:
+			raise ValueError("snap must be one of 'ref','brightest','fixed' for scene_photometry")
+
+		if ref_ind is not None:
+			def build_A(dx,dy):
+				A, _ = sp.build_design_matrix(prf,cent,(dx,dy),[],size,
+											   poly_order=bkg_poly_order,
+											   include_psf_derivatives=include_psf_derivatives)
+				return A
+			target_dxdy = sp.fit_scene_position(build_A,cutout[ref_ind].ravel(),tol_x=1.0,tol_y=1.0)
+		else:
+			target_dxdy = (0.0,0.0)
+
+		# -- neighbours, informed by the calibration catalogue -- #
+		neighbour_dxdys = []
+		expected_flux = np.array([])
+		if neighbours:
+			cat = getattr(self,'cat',None)
+			zp = getattr(self,'zp',None)
+			if (cat is not None) and (zp is not None):
+				mag_col = 'tmag' if 'tmag' in cat.columns else ('rp_ab' if 'rp_ab' in cat.columns else None)
+				if mag_col is not None:
+					dcol = cat['col'].values - xPix
+					drow = cat['row'].values - yPix
+					in_stamp = (np.abs(dcol) <= half) & (np.abs(drow) <= half)
+					is_target = np.hypot(dcol,drow) <= 0.5
+					sel = in_stamp & ~is_target
+					neighbour_dxdys = list(zip(dcol[sel],drow[sel]))
+					if len(neighbour_dxdys) > 0:
+						if diff:
+							# on a differenced cube a static neighbour's true
+							# amplitude is ~0 (it subtracts out against the
+							# reference), not its catalogue absolute flux --
+							# pulling toward the absolute flux here would bias
+							# the fit. Prior toward zero residual instead.
+							expected_flux = np.zeros(sel.sum())
+						else:
+							expected_flux = 10**(-0.4*(cat[mag_col].values[sel]-zp))
+			else:
+				warnings.warn('scene_photometry: neighbours=True but no calibration catalogue/zeropoint '
+							   'is set yet (run field_calibrate() or field_calibrate_scene() first); '
+							   'proceeding with neighbours unconstrained.')
+
+		A, info = sp.build_design_matrix(prf,cent,target_dxdy,neighbour_dxdys,size,
+										  poly_order=bkg_poly_order,
+										  include_psf_derivatives=include_psf_derivatives)
+
+		prior_flux = None
+		prior_strength = None
+		if len(neighbour_dxdys) > 0 and len(expected_flux) == len(neighbour_dxdys):
+			prior_flux = np.zeros(A.shape[1])
+			prior_strength = np.zeros(A.shape[1])
+			for k,idx in enumerate(info['neighbours']):
+				# a non-finite catalogue magnitude must not poison the shared
+				# closed-form solve (one NaN row contaminates every column via
+				# the matrix inverse) -- leave that neighbour unconstrained
+				# (still deblended via its own column, just with no prior).
+				if np.isfinite(expected_flux[k]):
+					prior_flux[idx] = expected_flux[k]
+					prior_strength[idx] = 1.0 / (neighbour_prior_mag_tol**2)
+
+		flux, eflux, coeffs = sp.fit_scene_lightcurve(cutout,A,prior_flux=prior_flux,prior_strength=prior_strength)
+		return flux, eflux
+
+
 	def orbit_ref_subtract(self):
 		"""
 		Subtract a per-orbit reference from each orbit's frames.
@@ -2689,7 +2843,7 @@ class tessreduce():
 			self.get_ref(ref_start,ref_stop)
 			_times['reference frame'] = time.perf_counter() - _t
 			if self.verbose > 0:
-				print('made reference')
+				print(f'made reference ({_times["reference frame"]:.2f}s)')
 			# make source mask
 			_t = time.perf_counter()
 			if mask is None:
@@ -2699,30 +2853,32 @@ class tessreduce():
 				if frac < 0.05:
 					print('!!!WARNING!!! mask is too dense, lowering mask_scale to 0.5, and raising maglim to 15. Background quality will be reduced.')
 					self.make_mask(catalogue_path=self._catalogue_path,maglim=15,strapsize=7,scale=0.2)
-				if self.verbose > 0:
-					print('made source mask')
+				_mask_msg = 'made source mask'
 			else:
 				self.mask = mask
-				if self.verbose > 0:
-					print('assigned source mask')
+				_mask_msg = 'assigned source mask'
 			if moving_mask is not None:
 					moving_mask = moving_mask > 0
 					temp = np.zeros_like(self.flux,dtype=int)
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
 			_times['source mask'] = time.perf_counter() - _t
+			if self.verbose > 0:
+				print(f'{_mask_msg} ({_times["source mask"]:.2f}s)')
 			# calculate background for each frame
 			if self.verbose > 0:
 				print('calculating background')
 			
 			# calculate the background
 			#self.flux -= self.ref
-			print('background pass 1...')
+			if self.verbose > 0:
+				print('background pass 1...')
 			_t = time.perf_counter()
 			self.background(rerun_negative=True)
 			self.flux -= self.bkg
 			_times['background (pass 1)'] = time.perf_counter() - _t
-			print('background pass 1 done')
+			if self.verbose > 0:
+				print(f'background pass 1 done ({_times["background (pass 1)"]:.2f}s)')
 
 			if np.isnan(self.bkg).all():
 				raise ValueError('bkg all nans')
@@ -2777,7 +2933,8 @@ class tessreduce():
 			else:
 				self.shift = np.zeros((len(self.flux),2))
 			_times['alignment'] = time.perf_counter() - _t
-			print('alignment done')
+			if self.verbose > 0:
+				print(f'alignment done ({_times["alignment"]:.2f}s)')
 
 			if not self.diff:
 				if self.align:
@@ -2786,7 +2943,7 @@ class tessreduce():
 					self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
 					_times['image shifting'] = time.perf_counter() - _t
 					if self.verbose > 0:
-						print('images shifted')
+						print(f'images shifted ({_times["image shifting"]:.2f}s)')
 					#if self.kernel_match:
 					#	self.kernel_matching(diff=False)
 
@@ -2838,24 +2995,29 @@ class tessreduce():
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
 				_times['difference imaging setup'] = time.perf_counter() - _t
-				print('diff setup done')
+				if self.verbose > 0:
+					print(f'diff setup done ({_times["difference imaging setup"]:.2f}s)')
 
 				self.bkg_orig = deepcopy(self.bkg)
-				print('background pass 2...')
+				if self.verbose > 0:
+					print('background pass 2...')
 				_t = time.perf_counter()
 				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,
 								gauss_smooth=self._bkg_gauss_sigma,interpolate=False,
 								rerun_negative=False,rerun_diff=True,blend_dynamic=True)
 				self.flux -= self.bkg
 				_times['background (pass 2)'] = time.perf_counter() - _t
-				print('background pass 2 done')
+				if self.verbose > 0:
+					print(f'background pass 2 done ({_times["background (pass 2)"]:.2f}s)')
 
 				if self.corr_correction:
 					_t = time.perf_counter()
-					print('correlation correction...')
+					if self.verbose > 0:
+						print('correlation correction...')
 					self.correlation_corrector()
 					_times['correlation correction'] = time.perf_counter() - _t
-					print('correlation correction done')
+					if self.verbose > 0:
+						print(f'correlation correction done ({_times["correlation correction"]:.2f}s)')
 				if self.kernel_match:
 					self.kernel_matching(diff=self.diff)
 					if self.verbose > 0:
@@ -2868,14 +3030,19 @@ class tessreduce():
 
 			if self.calibrate:
 				_t = time.perf_counter()
-				print('field calibration')
+				if self.verbose > 0:
+					print('field calibration...')
 				self.field_calibrate()
 				_times['field calibration'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'field calibration done ({_times["field calibration"]:.2f}s)')
 
 			if self._create_lc:
 				_t = time.perf_counter()
 				self.lc, self.sky = self.diff_lc(plot=self.plot,diff=self.diff,tar_ap=tar_ap,sky_in=sky_in,sky_out=sky_out)
 				_times['light curve'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'light curve extracted ({_times["light curve"]:.2f}s)')
 
 			if self.imaging:
 				# if self.verbose > 0:
@@ -3776,6 +3943,67 @@ class tessreduce():
 			self.tzp = mzp
 			self.tzp_e = stdzp
 
+		return
+
+	def field_calibrate_scene(self,catalog='ps1',mag_lo=None,mag_hi=None,plot=False,**kwargs):
+		"""
+		Scene-modelling photometric calibration.
+
+		Additive alternative to field_calibrate(): both pathways use the shared
+		scene-fit engine in scene_photom.py (real pixel-space deblending, formal
+		per-star error propagation, magnitude-binned robust zeropoint combining)
+		instead of field_calibrate()'s catalog-magnitude-space crowding correction
+		and coarse sanity-check gating. Sets self.zp/self.zp_e/self.tzp/self.tzp_e
+		exactly as field_calibrate() does, so diff_lc/light-curve unit conversion
+		works unchanged with either pathway. Does not touch field_calibrate().
+
+		Parameters
+		----------
+		catalog : {'ps1','gaia'}, optional
+			'ps1' (default) uses PS1 (dec>-30) or SkyMapper (dec<=-30), with the
+			existing Tonry-locus extinction correction and multi-band synthetic-
+			TESS-mag reconstruction -- both already AB. 'gaia' uses Gaia DR3
+			(queried via astroquery, matching tessreduce's existing catalogue
+			convention), calibrated directly against Rp with the standard
+			Vega->AB offset applied; no extinction step for this pathway.
+		mag_lo, mag_hi : float, optional
+			Magnitude range for the calibration sample. Defaults are pathway-
+			specific (8.5-16.0 for PS1/SkyMapper tmag, 11.0-15.5 for Gaia rp_ab).
+		plot : bool, optional
+			Passed through to the extinction fit (PS1/SkyMapper pathway only).
+		**kwargs
+			Forwarded to field_calibration._calibrate_common (e.g.
+			iso_radius_pix, stamp_size, poly_order, refine_iter, max_zp_err).
+
+		On failure (too few good stars, fits don't converge) a warning is
+		raised and self.zp/self.tzp fall back to 20.6 (self.zp_e/self.tzp_e=0.1),
+		rather than raising an exception.
+
+		Assigns
+		-------
+		self.zp/tzp : float
+			AB photometric zeropoint.
+		self.zp_e/tzp_e : float
+			Error in the photometric zeropoint.
+		self.cat : pandas.DataFrame
+			Calibration catalogue with pixel position (col,row) and either
+			tmag (PS1/SkyMapper pathway) or rp_ab (Gaia pathway).
+		"""
+		from . import field_calibration as fc
+
+		if catalog == 'ps1':
+			zp_ab, zp_err = fc.calibrate_ps1_skymapper(self,mag_lo=mag_lo,mag_hi=mag_hi,plot=plot,**kwargs)
+		elif catalog == 'gaia':
+			mag_lo = 11.0 if mag_lo is None else mag_lo
+			mag_hi = 15.5 if mag_hi is None else mag_hi
+			zp_ab, zp_err = fc.calibrate_gaia(self,mag_lo=mag_lo,mag_hi=mag_hi,plot=plot,**kwargs)
+		else:
+			raise ValueError(f"catalog must be 'ps1' or 'gaia', got {catalog!r}")
+
+		self.zp = zp_ab
+		self.zp_e = zp_err
+		self.tzp = zp_ab
+		self.tzp_e = zp_err
 		return
 
 	def to_mag(self,zp=None,zp_e=0):
