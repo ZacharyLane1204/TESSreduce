@@ -194,8 +194,8 @@ def _background2d_frame(frame, box_size, filter_size, sigma, maxiters, mask=None
 	except Exception:
 		return np.full_like(frame, np.nanmedian(frame))
 
-def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None):
-	return np.array(Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None, backend='loky', verbose=0):
+	return np.array(Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_background2d_frame)(frame, box_size, filter_size, sigma, maxiters, mask)
 		for frame in cube))
 
@@ -255,9 +255,9 @@ def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 						gauss_smooth = gauss_smooth * 4
 					estimate = gaussian_filter(estimate,gauss_smooth)
 		else:
-			estimate = np.zeros_like(data) * np.nan	
+			estimate = np.zeros_like(data)
 	else:
-		estimate = np.zeros_like(data) #* np.nan	
+		estimate = np.zeros_like(data)
 
 	return estimate
 
@@ -1117,7 +1117,7 @@ def _clip_region(image, rx, ry, sigma, iters):
 	cut = (image[ry, rx] >= me + sigma * s) | (image[ry, rx] <= me - sigma * s)
 	return rx[cut], ry[cut]
 
-def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1):
+def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1, backend='loky', verbose=0):
 	if size < 30:
 		print('!!! Region size is small !!!')
 	sx, sy = image.shape
@@ -1128,7 +1128,7 @@ def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1):
 	region_pixels = [np.where(regions == i) for i in range(max_reg + 1)]
 
 	clip = np.zeros_like(image)
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_clip_region)(image, rx, ry, sigma, iters)
 		for rx, ry in region_pixels)
 	for rx_cut, ry_cut in results:
@@ -1347,13 +1347,13 @@ def _strap_fit_col(col_data, norm_col):
 		q[:] = np.nanmedian(q)
 	return q
 
-def parallel_strap_fit(frame, frame_bkg, frame_err, mask, repeats=3, tol=3, n_jobs=1):
+def parallel_strap_fit(frame, frame_bkg, frame_err, mask, repeats=3, tol=3, n_jobs=1, backend='loky', verbose=0):
 	norm = frame / frame_bkg
 	sind = np.where(np.nansum(mask, axis=0) > 0)[0]
 	qe = np.ones_like(frame)
 	if len(sind) == 0:
 		return qe
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_strap_fit_col)(frame[:, i], norm[:, i])
 		for i in sind)
 	for col, q in zip(sind, results):
@@ -1558,10 +1558,12 @@ def _fix_bkg_frame(bkg_i, flux_i, bkgmask_i, prev_i, high_bkg_i,
 def _fit_residual_bkg(residual, exclude_mask, res_box, n_sigma):
 	from photutils.background import Background2D, MedianBackground
 	from astropy.stats import SigmaClip
+	if (~exclude_mask).sum() < 4:
+		return np.zeros_like(residual)
 	sc = SigmaClip(sigma=3.0, maxiters=5)
 	finite_vals = residual[~exclude_mask & np.isfinite(residual)]
-	med = np.nanmedian(finite_vals)
-	std = np.nanstd(finite_vals)
+	med = np.nanmedian(finite_vals) if finite_vals.size > 0 else 0.0
+	std = np.nanstd(finite_vals) if finite_vals.size > 0 else 0.0
 	transient_mask = exclude_mask | (np.abs(residual - med) > 5 * std)
 	try:
 		b = Background2D(residual, box_size=res_box, filter_size=3,
@@ -1569,7 +1571,8 @@ def _fit_residual_bkg(residual, exclude_mask, res_box, n_sigma):
 						 mask=transient_mask, fill_value=0.0)
 		corr = b.background
 	except Exception:
-		corr = np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+		valid = residual[~transient_mask]
+		corr = np.full_like(residual, np.nanmedian(valid) if valid.size > 0 else 0.0)
 	corr_resid = residual - corr
 	_, corr_med, corr_std = sigma_clipped_stats(corr_resid[~exclude_mask])
 	flagged = np.abs(corr_resid) > n_sigma * corr_std
@@ -1594,7 +1597,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2,
 							  sep_thresh=3.0, sep_snr_thresh=2.0, sep_validate=True,
 							  high_bkg_frames=None, high_bkg_thresh=200.0,
-							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1):
+							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1, backend='loky', verbose=0):
 	"""
 	Fix anomalies (asteroids, cosmic rays) in a background cube.
 
@@ -1659,7 +1662,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 			return None
 		return bkgmask_arr[i] if bkgmask_arr.ndim == 3 else bkgmask_arr
 
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_fix_bkg_frame)(
 			bkg[i],
 			flux[i] if flux is not None else None,
@@ -1683,7 +1686,7 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 		res_box = max(res_box, 4)
 
 		residuals = flux - bkg_fixed
-		corrections = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+		corrections = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 			delayed(_fit_residual_bkg)(
 				residuals[i],
 				np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr),
@@ -1800,11 +1803,14 @@ def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask
 		if diff_mask.any():
 			w[diff_mask] = np.nan
 			w = interpolate_replace_nans(w, Gaussian2DKernel(1.0))
+	w = np.where(np.isfinite(w), w, 0.0)
 	if sharp_mask_i is not None:
 		w[sharp_mask_i] = 0.0
-	return (1 - w) * bkg_new_i + w * bkg_prev_i
+	result = (1 - w) * bkg_new_i + w * bkg_prev_i
+	result = np.where(np.isfinite(result), result, bkg_prev_i)
+	return result
 
-def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None, n_jobs=1):
+def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None, n_jobs=1, backend='loky', verbose=0):
 	"""Per-pixel blend bkg_new toward bkg_prev based on residual quality.
 
 	For each pixel, compares |flux - bkg_new| vs |flux - bkg_prev|. Where
@@ -1835,7 +1841,7 @@ def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=Non
 	T = bkg_new.shape[0]
 	sharp_list = [sharp_masks[i] if sharp_masks is not None else None for i in range(T)]
 
-	results = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_blend_frame)(bkg_new[i], bkg_prev[i], delta[i], resid_prev[i],
 							  sigma, sharp_list[i])
 		for i in range(T))

@@ -128,6 +128,8 @@ def adaptive_medfilt_3d(
     per_pixel_norm=True,
     n_levels=7,
     n_jobs=1,
+    backend='loky',
+    verbose=0,
     metric='deviation',
     coarse_windows=(11, 21, 51, 101),
     combined_weight=0.5,
@@ -236,7 +238,7 @@ def adaptive_medfilt_3d(
                 dev[s:e] = median_filter(diff, size=(dw, 1, 1), mode='reflect')
             return dev
 
-        all_devs = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(delayed(_compute_dev)(cw) for cw in scales)
+        all_devs = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(delayed(_compute_dev)(cw) for cw in scales)
 
         _frame_mean = data_metric.mean(axis=(1, 2))
         _clipped = _frame_mean[np.isfinite(_frame_mean)]
@@ -280,7 +282,7 @@ def adaptive_medfilt_3d(
                 norm_scale = norm_scale * bright_mask
             return norm_scale
 
-        scale_norms = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+        scale_norms = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
             delayed(_compute_norm)((i, dev)) for i, dev in enumerate(all_devs)
         )
 
@@ -377,7 +379,7 @@ def adaptive_medfilt_3d(
         def _smooth_seg(w, seg=seg_data):
             return w, median_filter(seg, size=(w, 1, 1), mode='reflect')
 
-        for w, smoothed_w in Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(delayed(_smooth_seg)(w) for w in seg_levels):
+        for w, smoothed_w in Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(delayed(_smooth_seg)(w) for w in seg_levels):
             result[s:e][seg_wins == w] = smoothed_w[seg_wins == w]
 
     if sigma_clip is not None:
@@ -544,13 +546,15 @@ class AdaptiveBackground:
     >>> smoothed = ab.smoothed
     """
 
-    def __init__(self, data, time, sector, camera, data_path=None, n_jobs=-1, block_size=5):
+    def __init__(self, data, time, sector, camera, data_path=None, n_jobs=-1, block_size=5, backend='loky', verbose=0):
         self.data = np.asarray(data, dtype=np.float32)
         self.time = np.asarray(time, dtype=float)
         self.sector = int(sector)
         self.camera = int(camera)
         self.data_path = data_path
         self.n_jobs = n_jobs
+        self.backend = backend
+        self.verbose = verbose
         self.block_size = int(block_size)
 
         self.smoothed = None
@@ -578,6 +582,8 @@ class AdaptiveBackground:
         per_pixel_norm=True,
         n_levels=7,
         n_jobs=None,
+        backend=None,
+        verbose=None,
         metric='deviation',
         coarse_windows=(11, 21, 51, 101),
         combined_weight=0.5,
@@ -618,6 +624,10 @@ class AdaptiveBackground:
         else:
             if n_jobs is None:
                 n_jobs = self.n_jobs
+            if backend is None:
+                backend = self.backend
+            if verbose is None:
+                verbose = self.verbose
             if block_size is None:
                 block_size = self.block_size
             self.smoothed, self.windows, self.variability, self._windows_pre_smooth = (
@@ -633,6 +643,8 @@ class AdaptiveBackground:
                     per_pixel_norm=per_pixel_norm,
                     n_levels=n_levels,
                     n_jobs=n_jobs,
+                    backend=backend,
+                    verbose=verbose,
                     metric=metric,
                     coarse_windows=coarse_windows,
                     combined_weight=combined_weight,

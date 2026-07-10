@@ -22,7 +22,7 @@ from astropy.stats import sigma_clip
 import multiprocessing
 from joblib import Parallel, delayed
 
-def _available_cores():
+def _available_cores(verbose=1):
 	"""Return the number of CPU cores available to this process.
 
 	Checks in priority order:
@@ -34,18 +34,21 @@ def _available_cores():
 	if slurm is not None:
 		try:
 			n = int(slurm)
-			print(f'[tessreduce] _available_cores: SLURM_CPUS_PER_TASK={slurm} → {n} cores')
+			if verbose > 0:
+				print(f'[tessreduce] _available_cores: SLURM_CPUS_PER_TASK={slurm} → {n} cores')
 			return n
 		except ValueError:
 			pass
 	try:
 		n = len(os.sched_getaffinity(0))
-		print(f'[tessreduce] _available_cores: sched_getaffinity → {n} cores')
+		if verbose > 0:
+			print(f'[tessreduce] _available_cores: sched_getaffinity → {n} cores')
 		return n
 	except AttributeError:
 		pass
 	n = multiprocessing.cpu_count()
-	print(f'[tessreduce] _available_cores: cpu_count fallback → {n} cores')
+	if verbose > 0:
+		print(f'[tessreduce] _available_cores: cpu_count fallback → {n} cores')
 	return n
 
 from .catalog_tools import *
@@ -89,7 +92,7 @@ inches_per_pt = 1.0/72.27				# Convert pt to inches
 golden_mean = (np.sqrt(5)-1.0)/2.0		 # Aesthetic ratio
 fig_width = fig_width_pt*inches_per_pt  # width in inches
 
-def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, sigma=3.0):
+def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, sigma=3.0, backend='loky', verbose=0):
 	"""
 	Fit and subtract a smooth 2D residual surface per frame using photutils
 	Background2D. Operates on (flux - bkg) to capture large-scale structure
@@ -129,7 +132,7 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 
 	n_jobs = _available_cores()
 	residuals = flux - bkg
-	corrections = Parallel(n_jobs=n_jobs, backend="multiprocessing", verbose=1)(
+	corrections = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
 		delayed(_fit_bkg_surface_frame)(residuals[i], exclude_mask, box_size, filter_size, sigma)
 		for i in range(flux.shape[0]))
 	bkg += np.array(corrections)
@@ -141,7 +144,7 @@ class tessreduce():
 
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
 				 reduce=True,align=True,diff=True,corr_correction=False,kernel_match=False,calibrate=True,sourcehunt=True,
-				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
+				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,backend='loky',diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
@@ -189,6 +192,10 @@ class tessreduce():
 			Perform computation with parallel processing using 'num_cores'. The default is True.
 		num_cores : int, optional
 			Number of cores to run parallel process on. The default is -1 which uses max system cores.
+		backend : str, optional
+			joblib backend used for parallel processing. 'loky' (default) is robust in interactive
+			sessions such as Jupyter/IPython. Use 'multiprocessing' on servers/clusters (e.g. SLURM/OzStar)
+			where it is required.
 		diagnostic_plot : bool, optional
 			During reduction, plot figures which outline various calculation steps, such as the image shifts over time or the zeropoint calculation. The default is False.
 		plot : bool, optional
@@ -204,7 +211,8 @@ class tessreduce():
 		prf_path : str, optional
 			Path to local TESS PRF files. The default is currently a specific location on the OzStar supercomputer.
 		verbose : int, optional
-			Controls the level of verbosity, 0 is none, 1 is verbose. The default is 1.
+			Controls the level of verbosity. 0 is silent, 1 (default) prints reduction stage
+			announcements, 2 additionally prints joblib's per-task Parallel output.
 		timing : bool, optional
 			Print execution time reports for major pipeline blocks in background() and reduce(). The default is False.
 
@@ -230,9 +238,10 @@ class tessreduce():
 		self._center_mask = center_mask
 		self.imaging = imaging
 		self.parallel = parallel
+		self.backend = backend
 		self._col_offset = col_offset
 		if num_cores == -1 or isinstance(num_cores, str):
-			self.num_cores = _available_cores()
+			self.num_cores = _available_cores(verbose=verbose)
 		else:
 			self.num_cores = num_cores
 		self._assign_phot_method(phot_method)
@@ -250,11 +259,12 @@ class tessreduce():
 		self._cache_path = None
 
 		# SLURM environment diagnostics
-		_slurm_vars = ['SLURM_CPUS_PER_TASK', 'SLURM_NTASKS', 'SLURM_NTASKS_PER_NODE',
-					   'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']
-		_slurm_env = {k: os.environ.get(k, 'not set') for k in _slurm_vars}
-		print(f'[tessreduce] SLURM env: {_slurm_env}')
-		print(f'[tessreduce] num_cores resolved to: {self.num_cores}')
+		if verbose > 0:
+			_slurm_vars = ['SLURM_CPUS_PER_TASK', 'SLURM_NTASKS', 'SLURM_NTASKS_PER_NODE',
+						   'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']
+			_slurm_env = {k: os.environ.get(k, 'not set') for k in _slurm_vars}
+			print(f'[tessreduce] SLURM env: {_slurm_env}')
+			print(f'[tessreduce] num_cores resolved to: {self.num_cores}')
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -358,6 +368,11 @@ class tessreduce():
 
 		if reduce:
 			self.reduce()
+
+	@property
+	def _joblib_verbose(self):
+		"""joblib Parallel verbosity: 0 unless self.verbose requests joblib output (>=2)."""
+		return 1 if self.verbose >= 2 else 0
 
 	def check_coord(self):
 		"""
@@ -662,7 +677,7 @@ class tessreduce():
 		data = (self._flux_aligned - self.ref) #* mask
 		if self.parallel:
 			try:
-				m = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
+				m = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
 				m = np.array(m)
 			except:
 				m = np.ones_like(data)
@@ -789,10 +804,12 @@ class tessreduce():
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
 				_t = time.perf_counter()
-				print('smooth background...')
-				bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
+				if self.verbose > 0:
+					print('smooth background...')
+				bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				_times['initial smooth background'] = time.perf_counter() - _t
-				print('smooth background done')
+				if self.verbose > 0:
+					print('smooth background done')
 				if rerun_negative:
 					_t = time.perf_counter()
 					if self._use_error_image:
@@ -813,11 +830,12 @@ class tessreduce():
 					else:
 						m[over_sub] = 1
 					self._bkgmask = m
-					print('smooth background rerun (negative correction)...')
-					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+					if self.verbose > 0:
+						print('smooth background rerun (negative correction)...')
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
-					print('smooth background rerun done')
-
+					if self.verbose > 0:
+						print('smooth background rerun done')
 
 				if rerun_diff:
 					_t = time.perf_counter()
@@ -872,10 +890,11 @@ class tessreduce():
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
 					bkg_s1 = np.array(bkg_smth)
-					print('smooth background rerun (residual surface)...')
-					bkg_smth = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
+					if self.verbose > 0:
+						print('smooth background rerun (residual surface)...')
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
-						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores)
+						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 					_times['residual surface rerun'] = time.perf_counter() - _t
 
 			else:
@@ -884,7 +903,8 @@ class tessreduce():
 					bkg_smth[i] = Smooth_bkg((flux*m)[i],0,interpolate)
 				_times['initial smooth background'] = time.perf_counter() - _t
 		else:
-			print('Small tpf, using percentile cut background')
+			if self.verbose > 0:
+				print('Small tpf, using percentile cut background')
 			self.small_background()
 			bkg_smth = self.bkg
 		
@@ -905,27 +925,31 @@ class tessreduce():
 			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
 		else:
 			_high_bkg_frames = _bkg_median > 300.0
-		print('fixing background anomalies...')
+		if self.verbose > 0:
+			print('fixing background anomalies...')
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=deepcopy(self.flux),
 											bkg_prev=bkg_pre_fix if blend_dynamic else None,
 											bkgmask=self._bkgmask,
 											gauss_smooth=gauss_smooth,
 											high_bkg_frames=_high_bkg_frames,
-											n_jobs=self.num_cores)
+											n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 		_times['anomaly fixing'] = time.perf_counter() - _t
-		print('fixing background anomalies done')
+		if self.verbose > 0:
+			print('fixing background anomalies done')
 
 		_t = time.perf_counter()
-		print('adaptive temporal smoothing...')
+		if self.verbose > 0:
+			print('adaptive temporal smoothing...')
 		from .adaptive_background import AdaptiveBackground
 		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
-									  data_path=self._vector_path,n_jobs=self.num_cores)
+									  data_path=self._vector_path,n_jobs=self.num_cores,backend=self.backend,verbose=self._joblib_verbose)
 		if smoother._df is not None:
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 		_times['adaptive temporal smoothing'] = time.perf_counter() - _t
-		print('adaptive temporal smoothing done')
+		if self.verbose > 0:
+			print('adaptive temporal smoothing done')
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if rerun_diff:
@@ -939,7 +963,7 @@ class tessreduce():
 				bkg2d_mask = np.any(bkg2d_mask, axis=0)
 			bkg_corr = parallel_background2d(f, box_size=9, filter_size=3,
 											sigma=3, maxiters=5, n_jobs=self.num_cores,
-											mask=bkg2d_mask)
+											mask=bkg2d_mask, backend=self.backend, verbose=self._joblib_verbose)
 			self.bkg += bkg_corr
 
 			bkgmask_arr = np.asarray(self._bkgmask)
@@ -1020,7 +1044,7 @@ class tessreduce():
 			kern = np.ones((1,3,3))
 			dist_mask = convolve(dist_mask,kern) > 0
 			if self.parallel:
-				bkg_3 = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
+				bkg_3 = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
 															for i in np.arange(len(dist_mask)))
 			else:
 				bkg_3 = np.zeros_like(self.bkg)
@@ -1044,7 +1068,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1070,7 +1094,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1426,7 +1450,7 @@ class tessreduce():
 		self._dat_sources = s.to_pandas()
 		
 		if self.parallel:
-			shifts = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(
+			shifts = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 				delayed(Calculate_shifts)(frame,mx,my,finder) for frame in f)
 			shifts = np.array(shifts)
 		else:
@@ -1498,7 +1522,7 @@ class tessreduce():
 
 		if self.parallel:
 			ind = np.arange(len(f))
-			shifts = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(
+			shifts = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 						#delayed(difference_shifts)(f[i],m,self.eflux[i],eref) for i in ind)
 						delayed(difference_shifts)(f[i],m) for i in ind)
 			shifts = np.array(shifts)
@@ -1572,7 +1596,7 @@ class tessreduce():
 		shifted[nans] = 0.
 		if median:
 			if self.parallel:
-				result = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(
+				result = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 					delayed(_shift_ref_one)(self.ref, shifted[i], self.shift[i])
 					for i in range(len(shifted)))
 				shifted = np.array(result)
@@ -1583,7 +1607,7 @@ class tessreduce():
 
 		else:
 			if self.parallel:
-				result = Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(
+				result = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 					delayed(_shift_one)(shifted[i], self.shift[i])
 					for i in range(len(shifted)))
 				self.flux = np.array(result)
@@ -1792,12 +1816,12 @@ class tessreduce():
 			
 		if (ra is not None) & (dec is not None) & (self.tpf is not None):
 			x,y = self.wcs.all_world2pix(ra,dec,0)
-			x = int(np.round(x,0))
-			y = int(np.round(y,0))
+			x = int(np.round(np.ravel(x)[0],0))
+			y = int(np.round(np.ravel(y)[0],0))
 		elif (x is None) & (y is None):
 			x,y = self.wcs.all_world2pix(self.ra,self.dec,0)
-			x = int(np.round(x,0))
-			y = int(np.round(y,0))
+			x = int(np.round(np.ravel(x)[0],0))
+			y = int(np.round(np.ravel(y)[0],0))
 
 		ap_tar = np.zeros_like(data[0])
 		ap_sky = np.zeros_like(data[0])
@@ -1933,8 +1957,8 @@ class tessreduce():
 		maxind = np.where((np.nanmax(lc[1]) == lc[1]))[0]
 		try:
 			maxind = maxind[0]
-		except:
-			pass
+		except (IndexError, ValueError):
+			return
 		d = data[maxind]
 		nonan1 = np.isfinite(d)
 		nonan2 = np.isfinite(d*ap)
@@ -2291,7 +2315,7 @@ class tessreduce():
 				raise ValueError(m)
 		inds = np.arange(0,len(xpos))
 		if self.parallel:
-			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
+			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
 																						 self.tpf.sector,self.tpf.column,self.tpf.row,
 																					 size,[xpos[i],ypos[i]],time_ind) for i in inds))
 		else:
@@ -2304,7 +2328,7 @@ class tessreduce():
 		cutouts = np.array(cutouts)
 		print('made cutouts')
 		if self.parallel:
-			flux, pos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
+			flux, pos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
 		else:
 			flux = []
 			pos = []
@@ -2390,14 +2414,14 @@ class tessreduce():
 			eflux = np.zeros(len(self.flux)) * np.nan
 			psfphot2 = PSFPhotometry(epsf, fit_shape, finder=None,aperture_radius=1.5,
 									 xy_bounds=(0.05),localbkg_estimator=localbkg_estimator)
-			f,ef = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
+			f,ef = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
 			f = np.array(f).flatten()
 			ef = np.array(ef).flatten()
 			phot = phot.to_pandas()
 			pos = phot[['x_fit','y_fit']].values + np.array([xPix,yPix]) - size//2
 			epos = phot[['x_err','y_err']].values
 		else:
-			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
+			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
 			pos['x_fit'] += xPix - size//2
 			pos['y_fit'] += xPix - size//2
 		
@@ -2461,7 +2485,7 @@ class tessreduce():
 				prf, cutouts, ecutouts = self._psf_initialise(size,(xPix,yPix),ref=(not diff))	# gather base PRF and the array of cutouts data
 				inds = np.arange(len(cutouts))
 				base = create_psf(prf,size)
-				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
+				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
 
 				#prf, cutouts = self._psf_initialise(size,(xPix,yPix))	# gather base PRF and the array of cutouts data
 				#xShifts = []
@@ -2507,9 +2531,9 @@ class tessreduce():
 				if self.parallel:
 					inds = np.arange(len(cutouts))
 					if self.delta_kernel is not None:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 					else:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 				else:
 					for i in range(len(cutouts)):
 						flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2525,9 +2549,9 @@ class tessreduce():
 			if self.parallel:
 				inds = np.arange(len(cutouts))
 				if self.delta_kernel is not None:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 				else:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 			else:
 				for i in range(len(cutouts)):
 					flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2572,7 +2596,7 @@ class tessreduce():
 		mask = self.mask == 1 
 
 		if self.parallel:
-			d, kernel = zip(*Parallel(n_jobs=self.num_cores, backend="multiprocessing", verbose=1)(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
+			d, kernel = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
 		else:
 			d = []
 			kernel = []
@@ -2728,7 +2752,7 @@ class tessreduce():
 				elif self._shift_method == 'sep_core':
 					from .sep_aligner import SepAligner
 					aligner = SepAligner.from_tessreduce(self)
-					aligner.run()
+					aligner.run(verbose=self._joblib_verbose)
 					if self._smooth_motion:
 						aligner.smooth_shift(time=self.mjd,
 											 gap_thresh=0.5, # days

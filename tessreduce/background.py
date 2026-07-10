@@ -10,13 +10,15 @@ from .helpers import strip_units, Smooth_bkg
 
 
 class Background():
-	def __init__(self, flux, mask, buffer=3, extrapolate=True, parallel=True):
+	def __init__(self, flux, mask, buffer=3, extrapolate=True, parallel=True, backend='loky', verbose=0):
 
 		self.flux = flux
 		self.mask = mask
 		self.buffer = buffer
 		self.extrapolate = extrapolate
 		self.parallel = parallel
+		self.backend = backend
+		self.verbose = verbose
 		self.size = self._check_size()
 
 		self.smooth_bkg = np.zeros_like(flux)
@@ -80,7 +82,7 @@ class Background():
 
 		if self.parallel:
 			num_cores = multiprocessing.cpu_count()
-			bkg_smth = Parallel(n_jobs=num_cores, backend="multiprocessing", verbose=1)(
+			bkg_smth = Parallel(n_jobs=num_cores, backend=self.backend, verbose=self.verbose)(
 				delayed(Smooth_bkg)(frame) for frame in flux * m)
 		else:
 			bkg_smth = np.zeros_like(flux) * np.nan
