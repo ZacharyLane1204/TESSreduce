@@ -143,6 +143,7 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 class tessreduce():
 
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
+			  	 flux=None,mjd=None,wcs=None,camera=None,ccd=None,shifts=None,
 				 reduce=True,align=True,diff=True,corr_correction=False,kernel_match=False,calibrate=True,sourcehunt=True,
 				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,backend='loky',diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
@@ -281,16 +282,22 @@ class tessreduce():
 		self.diagnostic_plot = diagnostic_plot
 		self.savename = savename
 
+		# Optionally given
+		self.flux = flux
+		self.mjd = mjd
+		self.wcs = wcs
+		self.camera = camera
+		self.ccd = ccd 
+		self.shift = shifts
+
 		# Calculated 
 		self.mask = None
 		#self._over_sub = None
-		self.shift = None
 		self.bkg = None
-		self.flux = None
+		# self.flux = None
 		self.delta_kernel = None
 		self.ref = None
 		self.ref_ind = None
-		self.wcs = None	
 		self.qe = None
 		self.lc = None
 		self.sky = None
@@ -357,6 +364,40 @@ class tessreduce():
 			if not self.sector:
 				self.sector = 999
 
+			self.column = tpf.column
+			self.row = tpf.row
+			self.camera = self.tpf.camera
+			self.ccd = self.tpf.ccd
+
+		# -- Allow for cube to be given directly, but require MJD, WCS, Sector to be given as well -- #
+		elif self.flux is not None:
+			if self.mjd is None:
+				m = 'If flux is given, the MJD must also be given.'
+				raise ValueError(m)
+			if self.wcs is None:
+				m = 'If flux is given, the WCS must also be given.'
+				raise ValueError(m)
+			if self.sector is None:
+				m = 'If flux is given, the sector must also be given.'
+				raise ValueError(m)
+			if self._force_ref_ind is None:
+				m = 'If flux is given, the reference frame index must also be given.'
+				raise ValueError(m)
+			if self.camera is None:
+				m = 'If flux is given, the camera must also be given.'
+				raise ValueError(m)
+			if self.ccd is None:
+				m = 'If flux is given, the CCD must also be given.'
+				raise ValueError(m)
+			
+			self.size = self.flux.shape[1]
+			self.ra,self.dec = self.wcs.all_pix2world(self.size//2,self.size//2,0)
+			self.eflux = None
+			self.column = 0
+			self.row = 0
+			self.rawflux = deepcopy(self.flux)
+
+
 		# Retrieve TPF
 		elif self.check_coord():
 			if self.verbose>0:
@@ -406,7 +447,7 @@ class tessreduce():
 		"""
 		
 		# Get dataframe from Gaia around cutout
-		result = Get_Catalogue(self.tpf, Catalog = 'gaia')
+		result = Get_Catalogue(self.ra,self.dec,self.flux.shape, Catalog = 'gaia')
 		result = result[result.Gmag < maglim]
 		result = result.rename(columns={'RA_ICRS': 'ra',
 								'DE_ICRS': 'dec',
@@ -541,6 +582,11 @@ class tessreduce():
 			self.eflux = None
 		self.wcs = tpf.wcs
 		self.mjd = tpf.time.mjd
+		self.column = tpf.column
+		self.row = tpf.row
+		self.camera = self.tpf.camera
+		self.ccd = self.tpf.ccd
+
 
 	def make_mask(self,catalogue_path=None,maglim=19,scale=1,strapsize=6,useref=False):
 		"""
@@ -580,9 +626,9 @@ class tessreduce():
 
 		# Generate mask from source catalogue
 		if useref:
-			mask, cat = Cat_mask(self.tpf,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
+			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
 		else:
-			mask, cat = Cat_mask(self.tpf,catalogue_path,maglim,scale,strapsize,col_offset=self._col_offset)
+			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
 
 		# Generate sky background as the inverse of mask
 		sky = ((mask & 1)+1 == 1) * 1.
@@ -642,8 +688,8 @@ class tessreduce():
 
 		from PRF import TESS_PRF
 
-		col = self.tpf.column + int(self.size//2) # find column and row, when specifying location on a *say* 90x90 px cutout
-		row = self.tpf.row + int(self.size//2)
+		col = self.column + int(self.size//2) # find column and row, when specifying location on a *say* 90x90 px cutout
+		row = self.row + int(self.size//2)
 
 		col += 45 # add on the non-science columns
 		row += 1 # add on the non-science row
@@ -656,16 +702,16 @@ class tessreduce():
 		if self._catalogue_path is not None:
 
 			if self.sector < 4:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 								col,row,
 								localdatadir=f'{self._prf_path}/Sectors1_2_3')
 			else:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 								col,row,
 								localdatadir=f'{self._prf_path}/Sectors4+')
 		else:
 			try:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 										col,row)
 			except Exception as e:
 				print(f'Warning: could not load PRF (network error?): {e}')
@@ -918,7 +964,7 @@ class tessreduce():
 		# if calc_qe:
 		bkg_pre_fix = np.array(self.bkg)
 		from .adaptive_background import get_tessvectors, _interpolate_angles
-		_df = get_tessvectors(self.sector, self.tpf.camera, data_path=self._vector_path)
+		_df = get_tessvectors(self.sector, self.camera, data_path=self._vector_path)
 		_bkg_median = np.nanmedian(self.bkg, axis=(1, 2))
 		if _df is not None:
 			_earth_angle, _moon_angle = _interpolate_angles(self.mjd, _df)
@@ -942,7 +988,7 @@ class tessreduce():
 		if self.verbose > 0:
 			print('adaptive temporal smoothing...')
 		from .adaptive_background import AdaptiveBackground
-		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
+		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.camera,
 									  data_path=self._vector_path,n_jobs=self.num_cores,backend=self.backend,verbose=self._joblib_verbose)
 		if smoother._df is not None:
 			smoothed = smoother.smooth(method='savgol').smoothed
@@ -1435,8 +1481,8 @@ class tessreduce():
 
 		mean, med, std = sigma_clipped_stats(m, sigma=3.0)
 
-		prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.tpf.sector,
-							self.tpf.column+self.flux.shape[2]/2,self.tpf.row+self.flux.shape[1]/2)
+		prf = TESS_PRF(self.camera,self.ccd,self.sector,
+							self.column+self.flux.shape[2]/2,self.row+self.flux.shape[1]/2)
 		self.prf =  prf.locate(5,5,(11,11))
 		
 		finder = StarFinder(2*std,kernel=self.prf,exclude_border=True)
@@ -1468,7 +1514,7 @@ class tessreduce():
 		self.shift = meds #smooth
 		
 		if plot:
-			t = self.tpf.time.mjd
+			t = self.mjd
 			ind = np.where(np.diff(t) > .5)[0]
 			smooth[ind,:] = np.nan
 			plt.figure(figsize=(1.5*fig_width,1*fig_width))
@@ -1541,7 +1587,7 @@ class tessreduce():
 			self.shift = shifts
 
 		if plot:
-			t = self.tpf.time.mjd
+			t = self.mjd
 			ind = np.where(np.diff(t) > .5)[0]
 			shifts[ind,:] = np.nan
 			plt.figure(figsize=(1.5*fig_width,1*fig_width))
@@ -1559,7 +1605,7 @@ class tessreduce():
 
 	def plot_shifts(self,savename=None):
 		import matplotlib.pyplot as plt
-		t = self.tpf.time.mjd
+		t = self.mjd
 		shifts = self.shift
 		ind = np.where(np.diff(t) > .5)[0]
 		shifts[ind,:] = np.nan
@@ -1699,7 +1745,7 @@ class tessreduce():
 		if flux is None:
 			flux = self.flux
 
-		t = self.tpf.time.mjd
+		t = self.mjd
 
 		if time_bin is None:
 			bin_size = int(frames)
@@ -1814,7 +1860,7 @@ class tessreduce():
 			print(Warning('sky_out must be odd, adding 1'))
 			sky_in += 1
 			
-		if (ra is not None) & (dec is not None) & (self.tpf is not None):
+		if (ra is not None) & (dec is not None):
 			x,y = self.wcs.all_world2pix(ra,dec,0)
 			x = int(np.round(np.ravel(x)[0],0))
 			y = int(np.round(np.ravel(y)[0],0))
@@ -1894,8 +1940,8 @@ class tessreduce():
 					mask = self.orbit_segments == seg
 					tar[mask] += delta
 
-		if self.tpf is not None:
-			time = self.tpf.time.mjd
+		time = self.mjd
+
 		lc = np.array([time, tar, tar_err])
 		sky = np.array([time, sky_med, sky_std])
 		
@@ -2248,8 +2294,8 @@ class tessreduce():
 			time_ind = np.arange(0,len(self.flux))
 
 		
-		col = self.tpf.column - int(self.size//2) + loc[0] # find column and row, when specifying location on a *say* 90x90 px cutout
-		row = self.tpf.row - int(self.size//2) + loc[1] 
+		col = self.column - int(self.size//2) + loc[0] # find column and row, when specifying location on a *say* 90x90 px cutout
+		row = self.row - int(self.size//2) + loc[1] 
 
 		if isinstance(loc[0], (float, np.floating, np.float32, np.float64)):
 			loc[0] = int(np.round(loc[0],0))
@@ -2265,9 +2311,9 @@ class tessreduce():
 		row = np.max([row,10])
 		col = np.max([col,45])	
 		try:	
-			prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row) # initialise psf kernel
+			prf = TESS_PRF(self.camera,self.ccd,self.sector,col,row) # initialise psf kernel
 		except:
-			print(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row)
+			print(self.camera,self.ccd,self.sector,col,row)
 			raise ValueError
 		if ref:
 			cutout = (self.flux+self.ref)[time_ind,loc[1]-cutoutSize//2:loc[1]+1+cutoutSize//2,loc[0]-cutoutSize//2:loc[0]+1+cutoutSize//2] # gather cutouts
@@ -2315,8 +2361,8 @@ class tessreduce():
 				raise ValueError(m)
 		inds = np.arange(0,len(xpos))
 		if self.parallel:
-			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
-																						 self.tpf.sector,self.tpf.column,self.tpf.row,
+			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_initialise)(self.flux,self.camera,self.ccd,
+																						 self.sector,self.column,self.row,
 																					 size,[xpos[i],ypos[i]],time_ind) for i in inds))
 		else:
 			prfs = []
@@ -2365,8 +2411,8 @@ class tessreduce():
 
 		if epsf is None:
 			if self.epsf is None:
-				col = self.tpf.column - int(self.size//2) + yPix # find column and row, when specifying location on a *say* 90x90 px cutout
-				row = self.tpf.row - int(self.size//2) + xPix
+				col = self.column - int(self.size//2) + yPix # find column and row, when specifying location on a *say* 90x90 px cutout
+				row = self.row - int(self.size//2) + xPix
 				col += 45 # add on the non-science columns
 				row += 1 # add on the non-science row
 				if col > 2090:
@@ -2374,7 +2420,7 @@ class tessreduce():
 				if row > 2040:
 					row = 2040
 
-				self.epsf = simulate_epsf(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row)
+				self.epsf = simulate_epsf(self.camera,self.ccd,self.sector,col,row)
 			epsf = self.epsf
 
 		if local_bkg:
@@ -2575,8 +2621,8 @@ class tessreduce():
 
 		Updates self.flux in place and stores self.orbit_segments.
 		"""
-		sector = (self.tpf.sector if self.tpf is not None else None) or self.sector
-		camera = (self.tpf.camera if self.tpf is not None else None) or self.camera
+		sector = self.sector
+		camera = self.camera
 		flux, segments, orbit_refs = orbit_ref_subtract(deepcopy(self.flux), self.mjd,
 														sector=sector, camera=camera,
 														vector_path=self._vector_path)
@@ -2740,7 +2786,7 @@ class tessreduce():
 				raise ValueError('flux all nans')
 
 			_t = time.perf_counter()
-			if self.align:
+			if self.align and self.shift is None:
 				if self.verbose > 0:
 					print('aligning images')
 
@@ -2774,16 +2820,20 @@ class tessreduce():
 				# 		self.centroids_shifts_starfind()
 				# 	elif self._shift_method == 'minimize':
 				# 		self.fit_shift()
-			else:
+			elif self.shift is None:
 				self.shift = np.zeros((len(self.flux),2))
+
 			_times['alignment'] = time.perf_counter() - _t
 			print('alignment done')
+
+			rawcube = self.rawflux if hasattr(self,'rawflux') else self.tpf.flux.value
+			_bad_frames = np.nansum(rawcube,axis=(1,2))==0
 
 			if not self.diff:
 				if self.align:
 					_t = time.perf_counter()
 					self.shift_images()
-					self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
+					self.flux[_bad_frames] = np.nan
 					_times['image shifting'] = time.perf_counter() - _t
 					if self.verbose > 0:
 						print('images shifted')
@@ -2795,7 +2845,8 @@ class tessreduce():
 					print('!!Re-running for difference image!!')
 				# reseting to do diffim
 				_t = time.perf_counter()
-				self.flux = strip_units(self.tpf.flux)
+
+				self.flux = rawcube
 				self.flux = self.flux / self.qe
 
 				if self.align:
@@ -2806,7 +2857,8 @@ class tessreduce():
 				self._flux_aligned = deepcopy(self.flux)
 				if test_seed is not None:
 					self.flux += test_seed
-				self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
+				rawcube = self.rawflux if hasattr(self,'rawflux') else self.tpf.flux.value
+				self.flux[_bad_frames] = np.nan
 				# subtract reference
 				if self._ref_type.lower() == 'single':
 					self.ref = deepcopy(self.flux[self.ref_ind])
@@ -2943,7 +2995,7 @@ class tessreduce():
 		
 		# hack solution for new lightkurve
 		flux = strip_units(self.flux)
-		t = self.tpf.time.mjd
+		t = self.mjd
 
 		if type(aperture) == type(None):
 			aper = np.zeros_like(flux[0])
@@ -3401,13 +3453,13 @@ class tessreduce():
 		if self.dec < -30:
 			if self.verbose > 0:
 				print('target is below -30 dec, calibrating to SkyMapper photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='skymapper')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='skymapper')
 			table = Skymapper_df(table)
 			system = 'skymapper'
 		else:
 			if self.verbose > 0:
 				print('target is above -30 dec, calibrating to PS1 photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='ps1')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='ps1')
 			system = 'ps1'
 
 		if self.diff:
@@ -3539,7 +3591,7 @@ class tessreduce():
 		if self.dec < -30:
 			if self.verbose > 0:
 				print('target is below -30 dec, calibrating to SkyMapper photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='skymapper')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='skymapper')
 			system = 'skymapper'
 			if table is None:
 				print('WARNING: SkyMapper unavailable, skipping field calibration.')
@@ -3547,7 +3599,7 @@ class tessreduce():
 		else:
 			if self.verbose > 0:
 				print('target is above -30 dec, calibrating to PS1 photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='ps1')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='ps1')
 			system = 'ps1'
 		x,y = self.wcs.all_world2pix(table.RAJ2000.values,table.DEJ2000.values,0)
 		table['col'] = x
@@ -3736,7 +3788,7 @@ class tessreduce():
 			plt.gca().xaxis.set_major_locator(plt.MaxNLocator(6))
 
 			plt.subplot(122)
-			plt.plot(self.tpf.time.mjd[mask],mzp[mask],'.',alpha=0.5)
+			plt.plot(self.mjd[mask],mzp[mask],'.',alpha=0.5)
 			#plt.axhspan(averager.mean-averager.stdev,averager.mean+averager.stdev,alpha=0.3,color='C1')
 			#plt.axhline(averager.mean,color='C1')
 			#plt.axhspan(med-std,med+std,alpha=0.3,color='C1')
@@ -3759,7 +3811,7 @@ class tessreduce():
 
 		else:
 			zp = np.nanmedian(zp,axis=0)
-			mzp,stdzp = smooth_zp(zp, self.tpf.time.mjd)
+			mzp,stdzp = smooth_zp(zp, self.mjd)
 			compare = (abs(mzp-20.44) > 2).any()
 
 		if compare:
