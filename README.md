@@ -2,7 +2,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![DOI](https://img.shields.io/badge/DOI-10.3847%2F1538--3881%2Fac2c2e-blue.svg)](https://doi.org/10.3847/1538-3881/ac2c2e)
 
-![plot](./figs/header.png)
+![plot](https://raw.githubusercontent.com/CheerfulUser/TESSreduce/main/figs/header.png)
 
 With this package that builds on lightkurve, you can reduce TESS data while preserving transient signals. You can supply a TPF or give coordinates and sector to construct a TPF with TESScut. The background subtraction accounts for the smooth background and
 detector straps. Alongisde background subtraction TESSreduce also aligns images, performs difference imaging, and can even detect transient events! 
@@ -29,7 +29,7 @@ obs = tr.sn_lookup('sn2018fub')
 ```python
 tess = tr.tessreduce(obs_list=obs)
 ```
-![plot](./figs/fub.png)
+![plot](https://raw.githubusercontent.com/CheerfulUser/TESSreduce/main/figs/fub.png)
 
 **OR**
 ```python
@@ -75,7 +75,7 @@ Several options are available for flux and are interchangeable, however, mag is 
 ```python
 tess.plotter()
 ```
-![plot](./figs/fub_cal.png)
+![plot](https://raw.githubusercontent.com/CheerfulUser/TESSreduce/main/figs/fub_cal.png)
 
 
 # Extracting key variables 

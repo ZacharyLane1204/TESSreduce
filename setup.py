@@ -38,7 +38,7 @@ REQUIRED = ['lightkurve>=2.0.0',
             'sep',
             'tqdm',
             'alerce',
-            'tesswcs',
+            'tesswcs>=1.8',
             'tabulate',
             'TESS_PRF']
 
@@ -137,9 +137,11 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: Implementation :: CPython',
-        'Programming Language :: Python :: Implementation :: PyPy'
     ],
     # $ setup.py publish support.
     cmdclass={
