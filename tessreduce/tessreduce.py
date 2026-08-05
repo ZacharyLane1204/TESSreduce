@@ -22,6 +22,35 @@ from astropy.stats import sigma_clip
 import multiprocessing
 from joblib import Parallel, delayed
 
+def _available_cores(verbose=1):
+	"""Return the number of CPU cores available to this process.
+
+	Checks in priority order:
+	  1. SLURM_CPUS_PER_TASK - cores allocated by SLURM scheduler
+	  2. os.sched_getaffinity - respects cgroup/affinity limits (Linux)
+	  3. multiprocessing.cpu_count - total node CPUs (fallback)
+	"""
+	slurm = os.environ.get('SLURM_CPUS_PER_TASK')
+	if slurm is not None:
+		try:
+			n = int(slurm)
+			if verbose >= 3:
+				print(f'[tessreduce] _available_cores: SLURM_CPUS_PER_TASK={slurm} → {n} cores')
+			return n
+		except ValueError:
+			pass
+	try:
+		n = len(os.sched_getaffinity(0))
+		if verbose >= 3:
+			print(f'[tessreduce] _available_cores: sched_getaffinity → {n} cores')
+		return n
+	except AttributeError:
+		pass
+	n = multiprocessing.cpu_count()
+	if verbose >= 3:
+		print(f'[tessreduce] _available_cores: cpu_count fallback → {n} cores')
+	return n
+
 from .catalog_tools import *
 from .calibration_tools import *
 from .ground_tools import ground
@@ -42,12 +71,28 @@ pd.options.mode.chained_assignment = None
 # set the package directory so we can load in a file later
 package_directory = os.path.dirname(os.path.abspath(__file__)) + '/'
 
+def _fit_bkg_surface_frame(residual, exclude_mask, box_size, filter_size, sigma):
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	sc = SigmaClip(sigma=sigma, maxiters=5)
+	finite_vals = residual[~exclude_mask & np.isfinite(residual)]
+	med = np.nanmedian(finite_vals)
+	std = np.nanstd(finite_vals)
+	transient_mask = exclude_mask | (residual > med + 5 * std)
+	try:
+		b = Background2D(residual, box_size=box_size, filter_size=filter_size,
+						 sigma_clip=sc, bkg_estimator=MedianBackground(),
+						 mask=transient_mask, fill_value=0.0)
+		return b.background
+	except Exception:
+		return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
+
 fig_width_pt = 240.0  # Get this from LaTeX using \showthe\columnwidth
 inches_per_pt = 1.0/72.27				# Convert pt to inches
 golden_mean = (np.sqrt(5)-1.0)/2.0		 # Aesthetic ratio
 fig_width = fig_width_pt*inches_per_pt  # width in inches
 
-def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, sigma=3.0):
+def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, sigma=3.0, backend='loky', verbose=0):
 	"""
 	Fit and subtract a smooth 2D residual surface per frame using photutils
 	Background2D. Operates on (flux - bkg) to capture large-scale structure
@@ -79,35 +124,17 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 	from astropy.stats import SigmaClip
 	from joblib import Parallel, delayed
 
-	sc = SigmaClip(sigma=sigma, maxiters=5)
-	estimator = MedianBackground()
-
 	bkgmask = np.asarray(bkgmask)
 	if bkgmask.ndim == 3:
 		exclude_mask = np.any(np.isnan(bkgmask), axis=0)
 	else:
 		exclude_mask = np.isnan(bkgmask)
 
-	def _fit_frame(residual):
-		finite_vals = residual[~exclude_mask & np.isfinite(residual)]
-		med = np.nanmedian(finite_vals)
-		std = np.nanstd(finite_vals)
-		transient_mask = exclude_mask | (residual > med + 5 * std)
-		try:
-			b = Background2D(residual,
-							box_size=box_size,
-							filter_size=filter_size,
-							sigma_clip=sc,
-							bkg_estimator=estimator,
-							mask=transient_mask,
-							fill_value=0.0)
-			return b.background
-		except Exception:
-			return np.full_like(residual, np.nanmedian(residual[~transient_mask]))
-
-	n_jobs = -1
+	n_jobs = _available_cores()
 	residuals = flux - bkg
-	corrections = Parallel(n_jobs=n_jobs)(delayed(_fit_frame)(residuals[i]) for i in range(flux.shape[0]))
+	corrections = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_fit_bkg_surface_frame)(residuals[i], exclude_mask, box_size, filter_size, sigma)
+		for i in range(flux.shape[0]))
 	bkg += np.array(corrections)
 
 	return bkg
@@ -116,8 +143,9 @@ def _subtract_residual_surface(bkg, flux, bkgmask, box_size=20, filter_size=5, s
 class tessreduce():
 
 	def __init__(self,ra=None,dec=None,name=None,obs_list=None,tpf=None,size=90,sector=None,
+			  	 flux=None,mjd=None,wcs=None,camera=None,ccd=None,shifts=None,
 				 reduce=True,align=True,diff=True,corr_correction=False,kernel_match=False,calibrate=True,sourcehunt=True,
-				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,diagnostic_plot=False,plot=True,
+				 phot_method='aperture',imaging=False,parallel=True,num_cores=-1,backend='loky',diagnostic_plot=False,plot=True,
 				 savename=None,quality_bitmask='hard',cache_dir=None,cache=True,catalogue_path=False,
 				 shift_method='sep_core',use_error_image=False,prf_path=None,verbose=1,col_offset=0,
 				 bkg_temporal_window=501,ref_ind=None,ref_type='stack',ref_time_window=2,vector_path=None,
@@ -165,6 +193,10 @@ class tessreduce():
 			Perform computation with parallel processing using 'num_cores'. The default is True.
 		num_cores : int, optional
 			Number of cores to run parallel process on. The default is -1 which uses max system cores.
+		backend : str, optional
+			joblib backend used for parallel processing. 'loky' (default) is robust in interactive
+			sessions such as Jupyter/IPython. Use 'multiprocessing' on servers/clusters (e.g. SLURM/OzStar)
+			where it is required.
 		diagnostic_plot : bool, optional
 			During reduction, plot figures which outline various calculation steps, such as the image shifts over time or the zeropoint calculation. The default is False.
 		plot : bool, optional
@@ -180,7 +212,9 @@ class tessreduce():
 		prf_path : str, optional
 			Path to local TESS PRF files. The default is currently a specific location on the OzStar supercomputer.
 		verbose : int, optional
-			Controls the level of verbosity, 0 is none, 1 is verbose. The default is 1.
+			Controls the level of verbosity. 0 is silent, 1 (default) prints top-level reduction
+			stage announcements, 2 additionally prints background() sub-step announcements (with
+			per-step timing), 3 additionally prints joblib's per-task Parallel output.
 		timing : bool, optional
 			Print execution time reports for major pipeline blocks in background() and reduce(). The default is False.
 
@@ -206,9 +240,10 @@ class tessreduce():
 		self._center_mask = center_mask
 		self.imaging = imaging
 		self.parallel = parallel
+		self.backend = backend
 		self._col_offset = col_offset
-		if isinstance(num_cores, str):
-			self.num_cores = multiprocessing.cpu_count()
+		if num_cores == -1 or isinstance(num_cores, str):
+			self.num_cores = _available_cores(verbose=verbose)
 		else:
 			self.num_cores = num_cores
 		self._assign_phot_method(phot_method)
@@ -223,6 +258,15 @@ class tessreduce():
 		self._quality_bitmask = quality_bitmask
 		self._smooth_motion = smooth_motion
 		self._timing = timing
+		self._cache_path = None
+
+		# SLURM environment diagnostics
+		if verbose >= 3:
+			_slurm_vars = ['SLURM_CPUS_PER_TASK', 'SLURM_NTASKS', 'SLURM_NTASKS_PER_NODE',
+						   'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']
+			_slurm_env = {k: os.environ.get(k, 'not set') for k in _slurm_vars}
+			print(f'[tessreduce] SLURM env: {_slurm_env}')
+			print(f'[tessreduce] num_cores resolved to: {self.num_cores}')
 
 		# Offline Paths 
 		if catalogue_path is None:
@@ -230,7 +274,6 @@ class tessreduce():
 		elif catalogue_path is False:
 			catalogue_path = None
 		self._catalogue_path = catalogue_path
-		self.num_cores = num_cores
 		self.imaging = imaging
 		self._prf_path = prf_path
 		self._vector_path = vector_path
@@ -240,16 +283,26 @@ class tessreduce():
 		self.diagnostic_plot = diagnostic_plot
 		self.savename = savename
 
-		# Calculated 
+		# Optionally given
+		self.flux = flux
+		self.mjd = mjd
+		self.wcs = wcs
+		self.camera = camera
+		self.ccd = ccd 
+		self.shift = shifts
+
+		# Calculated
 		self.mask = None
 		#self._over_sub = None
-		self.shift = None
 		self.bkg = None
-		self.flux = None
+		# self.flux = None
+		self.flux_raw = None
+		self.quality = None
+		self.column = None
+		self.row = None
 		self.delta_kernel = None
 		self.ref = None
 		self.ref_ind = None
-		self.wcs = None	
 		self.qe = None
 		self.lc = None
 		self.sky = None
@@ -316,6 +369,51 @@ class tessreduce():
 			if not self.sector:
 				self.sector = 999
 
+			self.column = tpf.column
+			self.row = tpf.row
+			self.camera = self.tpf.camera
+			self.ccd = self.tpf.ccd
+			self.quality = self.tpf.quality
+			self.flux_raw = deepcopy(self.flux)
+
+			# All values needed downstream are now class attributes, so drop the
+			# tpf object rather than keep its flux cube duplicated in memory.
+			try:
+				self.tpf.hdu.close()
+			except Exception:
+				pass
+			self.tpf = None
+
+		# -- Allow for cube to be given directly, but require MJD, WCS, Sector to be given as well -- #
+		elif self.flux is not None:
+			if self.mjd is None:
+				m = 'If flux is given, the MJD must also be given.'
+				raise ValueError(m)
+			if self.wcs is None:
+				m = 'If flux is given, the WCS must also be given.'
+				raise ValueError(m)
+			if self.sector is None:
+				m = 'If flux is given, the sector must also be given.'
+				raise ValueError(m)
+			if self._force_ref_ind is None:
+				m = 'If flux is given, the reference frame index must also be given.'
+				raise ValueError(m)
+			if self.camera is None:
+				m = 'If flux is given, the camera must also be given.'
+				raise ValueError(m)
+			if self.ccd is None:
+				m = 'If flux is given, the CCD must also be given.'
+				raise ValueError(m)
+			
+			self.size = self.flux.shape[1]
+			self.ra,self.dec = self.wcs.all_pix2world(self.size//2,self.size//2,0)
+			self.eflux = None
+			self.column = 0
+			self.row = 0
+			self.quality = np.zeros(len(self.flux),dtype=int)
+			self.flux_raw = deepcopy(self.flux)
+
+
 		# Retrieve TPF
 		elif self.check_coord():
 			if self.verbose>0:
@@ -327,6 +425,11 @@ class tessreduce():
 
 		if reduce:
 			self.reduce()
+
+	@property
+	def _joblib_verbose(self):
+		"""joblib Parallel verbosity: 0 unless self.verbose requests joblib output (>=3)."""
+		return 1 if self.verbose >= 3 else 0
 
 	def check_coord(self):
 		"""
@@ -360,7 +463,7 @@ class tessreduce():
 		"""
 		
 		# Get dataframe from Gaia around cutout
-		result = Get_Catalogue(self.tpf, Catalog = 'gaia')
+		result = Get_Catalogue(self.ra,self.dec,self.flux.shape, Catalog = 'gaia')
 		result = result[result.Gmag < maglim]
 		result = result.rename(columns={'RA_ICRS': 'ra',
 								'DE_ICRS': 'dec',
@@ -477,12 +580,9 @@ class tessreduce():
 		# Download 
 		tpf = tess.download(quality_bitmask=quality_bitmask,cutout_size=size,download_dir=cache_dir)
 		if not cache:
-			try:
-				os.remove(tpf.path)
-				if self.verbose > 0:
-					print('Cache removed')
-			except OSError:
-				print(f'Failed to remove: {tpf.path}')
+			self._cache_path = tpf.path
+		else:
+			self._cache_path = None
 
 		# Check to ensure it succeeded
 		if tpf is None:
@@ -498,6 +598,21 @@ class tessreduce():
 			self.eflux = None
 		self.wcs = tpf.wcs
 		self.mjd = tpf.time.mjd
+		self.column = tpf.column
+		self.row = tpf.row
+		self.camera = self.tpf.camera
+		self.ccd = self.tpf.ccd
+		self.quality = self.tpf.quality
+		self.flux_raw = deepcopy(self.flux)
+
+		# All values needed downstream are now class attributes, so drop the
+		# tpf object rather than keep its flux cube duplicated in memory.
+		try:
+			self.tpf.hdu.close()
+		except Exception:
+			pass
+		self.tpf = None
+
 
 	def make_mask(self,catalogue_path=None,maglim=19,scale=1,strapsize=6,useref=False):
 		"""
@@ -537,9 +652,9 @@ class tessreduce():
 
 		# Generate mask from source catalogue
 		if useref:
-			mask, cat = Cat_mask(self.tpf,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
+			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
 		else:
-			mask, cat = Cat_mask(self.tpf,catalogue_path,maglim,scale,strapsize,col_offset=self._col_offset)
+			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,col_offset=self._col_offset)
 
 		# Generate sky background as the inverse of mask
 		sky = ((mask & 1)+1 == 1) * 1.
@@ -599,8 +714,8 @@ class tessreduce():
 
 		from PRF import TESS_PRF
 
-		col = self.tpf.column + int(self.size//2) # find column and row, when specifying location on a *say* 90x90 px cutout
-		row = self.tpf.row + int(self.size//2)
+		col = self.column + int(self.size//2) # find column and row, when specifying location on a *say* 90x90 px cutout
+		row = self.row + int(self.size//2)
 
 		col += 45 # add on the non-science columns
 		row += 1 # add on the non-science row
@@ -613,16 +728,16 @@ class tessreduce():
 		if self._catalogue_path is not None:
 
 			if self.sector < 4:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 								col,row,
 								localdatadir=f'{self._prf_path}/Sectors1_2_3')
 			else:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 								col,row,
 								localdatadir=f'{self._prf_path}/Sectors4+')
 		else:
 			try:
-				prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.sector,
+				prf = TESS_PRF(self.camera,self.ccd,self.sector,
 										col,row)
 			except Exception as e:
 				print(f'Warning: could not load PRF (network error?): {e}')
@@ -634,7 +749,7 @@ class tessreduce():
 		data = (self._flux_aligned - self.ref) #* mask
 		if self.parallel:
 			try:
-				m = Parallel(n_jobs=self.num_cores)(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
+				m = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_source_mask)(frame,self.prf,sigma) for frame in data)
 				m = np.array(m)
 			except:
 				m = np.ones_like(data)
@@ -654,8 +769,9 @@ class tessreduce():
 		'''
 		time = deepcopy(self.mjd)
 		strap_data = (self.flux) * ((self.mask&4) > 0)*(~self.mask&1)
-		qe = strap_data/self.bkg
-		qe[qe == 0] = np.nan
+		with np.errstate(divide='ignore', invalid='ignore'):
+			qe = strap_data / self.bkg
+		qe[~np.isfinite(qe)] = np.nan
 		m,med,std = sigma_clipped_stats(qe,axis=1,sigma_upper=2)
 		qes = np.ones_like(qe)
 		qes[:,:,:] = med[:,np.newaxis,:]
@@ -760,8 +876,12 @@ class tessreduce():
 			bkg_smth = np.zeros_like(flux) * np.nan
 			if self.parallel:
 				_t = time.perf_counter()
-				bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
+				if self.verbose >= 2:
+					print('smooth background...')
+				bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*m)
 				_times['initial smooth background'] = time.perf_counter() - _t
+				if self.verbose >= 2:
+					print(f'smooth background done ({_times["initial smooth background"]:.2f}s)')
 				if rerun_negative:
 					_t = time.perf_counter()
 					if self._use_error_image:
@@ -782,9 +902,12 @@ class tessreduce():
 					else:
 						m[over_sub] = 1
 					self._bkgmask = m
-					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
+					if self.verbose >= 2:
+						print('smooth background rerun (negative correction)...')
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,gauss_smooth,interpolate) for frame in flux*m)
 					_times['negative over-subtraction rerun'] = time.perf_counter() - _t
-
+					if self.verbose >= 2:
+						print(f'smooth background rerun done ({_times["negative over-subtraction rerun"]:.2f}s)')
 
 				if rerun_diff:
 					_t = time.perf_counter()
@@ -803,13 +926,17 @@ class tessreduce():
 
 					estimator = MedianBackground()
 					sc = SigmaClip(sigma=5, maxiters=5)
-					b = Background2D(std,
-									box_size=5,
-									filter_size=3,
-									sigma_clip=sc,
-									bkg_estimator=estimator,
-									fill_value=0.0)
-					std_sub = std - b.background
+					try:
+						b = Background2D(std,
+										box_size=5,
+										filter_size=3,
+										sigma_clip=sc,
+										bkg_estimator=estimator,
+										exclude_percentile=50,
+										fill_value=0.0)
+						std_sub = std - b.background
+					except ValueError:
+						std_sub = std
 					_,smed,sstd = sigma_clipped_stats(std_sub)
 					resid_mask = (std_sub > smed + 3*sstd) * 1.0
 					ny, nx = resid_mask.shape
@@ -835,10 +962,14 @@ class tessreduce():
 						new_mask = abs(new_mask - 1)
 					self._bkgmask = new_mask
 					bkg_s1 = np.array(bkg_smth)
-					bkg_smth = Parallel(n_jobs=self.num_cores)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
+					if self.verbose >= 2:
+						print('smooth background rerun (residual surface)...')
+					bkg_smth = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(Smooth_bkg)(frame,0,interpolate) for frame in flux*new_mask)
 					if blend_dynamic:
-						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux)
+						bkg_smth = blend_dynamic_background(bkg_smth, bkg_s1, flux, n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 					_times['residual surface rerun'] = time.perf_counter() - _t
+					if self.verbose >= 2:
+						print(f'smooth background rerun (residual surface) done ({_times["residual surface rerun"]:.2f}s)')
 
 			else:
 				_t = time.perf_counter()
@@ -860,30 +991,38 @@ class tessreduce():
 		# if calc_qe:
 		bkg_pre_fix = np.array(self.bkg)
 		from .adaptive_background import get_tessvectors, _interpolate_angles
-		_df = get_tessvectors(self.sector, self.tpf.camera, data_path=self._vector_path)
-		_bkg_median = np.array([np.nanmedian(self.bkg[i]) for i in range(len(self.bkg))])
+		_df = get_tessvectors(self.sector, self.camera, data_path=self._vector_path)
+		_bkg_median = np.nanmedian(self.bkg, axis=(1, 2))
 		if _df is not None:
 			_earth_angle, _moon_angle = _interpolate_angles(self.mjd, _df)
 			_high_bkg_frames = (_earth_angle < 30.0) | (_moon_angle < 30.0) | (_bkg_median > 300.0)
 		else:
 			_high_bkg_frames = _bkg_median > 300.0
+		if self.verbose >= 2:
+			print('fixing background anomalies...')
 		self.bkg, _sharp_masks, self.bad_bkg = fix_background_anomalies(self.bkg, self.mask,
 											flux=deepcopy(self.flux),
 											bkg_prev=bkg_pre_fix if blend_dynamic else None,
 											bkgmask=self._bkgmask,
 											gauss_smooth=gauss_smooth,
 											high_bkg_frames=_high_bkg_frames,
-											n_jobs=self.num_cores)
+											n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)
 		_times['anomaly fixing'] = time.perf_counter() - _t
+		if self.verbose >= 2:
+			print(f'fixing background anomalies done ({_times["anomaly fixing"]:.2f}s)')
 
 		_t = time.perf_counter()
+		if self.verbose >= 2:
+			print('adaptive temporal smoothing...')
 		from .adaptive_background import AdaptiveBackground
-		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.tpf.camera,
-									  data_path=self._vector_path,n_jobs=self.num_cores)
+		smoother = AdaptiveBackground(self.bkg, self.mjd, sector=self.sector, camera=self.camera,
+									  data_path=self._vector_path,n_jobs=self.num_cores,backend=self.backend,verbose=self._joblib_verbose)
 		if smoother._df is not None:
 			smoothed = smoother.smooth(method='savgol').smoothed
 			self.bkg = smoothed
 		_times['adaptive temporal smoothing'] = time.perf_counter() - _t
+		if self.verbose >= 2:
+			print(f'adaptive temporal smoothing done ({_times["adaptive temporal smoothing"]:.2f}s)')
 
 		# Store data-driven sources from _bkgmask as bit 8, preserving the catalogue mask (bit 1)
 		if rerun_diff:
@@ -897,7 +1036,7 @@ class tessreduce():
 				bkg2d_mask = np.any(bkg2d_mask, axis=0)
 			bkg_corr = parallel_background2d(f, box_size=9, filter_size=3,
 											sigma=3, maxiters=5, n_jobs=self.num_cores,
-											mask=bkg2d_mask)
+											mask=bkg2d_mask, backend=self.backend, verbose=self._joblib_verbose)
 			self.bkg += bkg_corr
 
 			bkgmask_arr = np.asarray(self._bkgmask)
@@ -978,7 +1117,7 @@ class tessreduce():
 			kern = np.ones((1,3,3))
 			dist_mask = convolve(dist_mask,kern) > 0
 			if self.parallel:
-				bkg_3 = Parallel(n_jobs=self.num_cores)(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
+				bkg_3 = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_bkg3)(self.bkg[i],dist_mask[i]) 
 															for i in np.arange(len(dist_mask)))
 			else:
 				bkg_3 = np.zeros_like(self.bkg)
@@ -1002,7 +1141,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores)(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(clip_background)(self.bkg[i],self.mask,sigma,ideal_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1028,7 +1167,7 @@ class tessreduce():
 		"""
 		
 		if self.parallel:
-			bkg_clip = Parallel(n_jobs=self.num_cores)(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
+			bkg_clip = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(grad_clip_fill_bkg)(self.bkg[i],sigma,max_size) 
 														for i in np.arange(len(self.bkg)))
 		else:
 			bkg_clip = np.zeros_like(self.bkg)
@@ -1297,7 +1436,7 @@ class tessreduce():
 			start = int(start)
 			stop = int(stop)
 
-			ind = self.tpf.quality[start:stop] == 0
+			ind = self.quality[start:stop] == 0
 			d = deepcopy(data[start:stop])[ind]
 			summed = np.nanmedian(d,axis=(1,2))
 			summed[summed <=0] = 1e5
@@ -1369,8 +1508,8 @@ class tessreduce():
 
 		mean, med, std = sigma_clipped_stats(m, sigma=3.0)
 
-		prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.tpf.sector,
-							self.tpf.column+self.flux.shape[2]/2,self.tpf.row+self.flux.shape[1]/2)
+		prf = TESS_PRF(self.camera,self.ccd,self.sector,
+							self.column+self.flux.shape[2]/2,self.row+self.flux.shape[1]/2)
 		self.prf =  prf.locate(5,5,(11,11))
 		
 		finder = StarFinder(2*std,kernel=self.prf,exclude_border=True)
@@ -1384,7 +1523,7 @@ class tessreduce():
 		self._dat_sources = s.to_pandas()
 		
 		if self.parallel:
-			shifts = Parallel(n_jobs=self.num_cores)(
+			shifts = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 				delayed(Calculate_shifts)(frame,mx,my,finder) for frame in f)
 			shifts = np.array(shifts)
 		else:
@@ -1396,13 +1535,13 @@ class tessreduce():
 		meds = np.nanmedian(shifts,axis = 2)
 		meds[~np.isfinite(meds)] = 0
 
-		smooth = Smooth_motion(meds,self.tpf)
+		smooth = Smooth_motion(meds,self.mjd,self.flux_raw)
 		nans = np.nansum(f,axis=(1,2)) ==0
 		smooth[nans] = np.nan
 		self.shift = meds #smooth
 		
 		if plot:
-			t = self.tpf.time.mjd
+			t = self.mjd
 			ind = np.where(np.diff(t) > .5)[0]
 			smooth[ind,:] = np.nan
 			plt.figure(figsize=(1.5*fig_width,1*fig_width))
@@ -1456,7 +1595,7 @@ class tessreduce():
 
 		if self.parallel:
 			ind = np.arange(len(f))
-			shifts = Parallel(n_jobs=self.num_cores)(
+			shifts = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
 						#delayed(difference_shifts)(f[i],m,self.eflux[i],eref) for i in ind)
 						delayed(difference_shifts)(f[i],m) for i in ind)
 			shifts = np.array(shifts)
@@ -1467,7 +1606,7 @@ class tessreduce():
 				shifts[i,:] = difference_shifts(f[i],m)
 		sraw = deepcopy(shifts)
 		if smooth:
-			shifts = Smooth_motion(shifts,self.tpf)
+			shifts = Smooth_motion(shifts,self.mjd,self.flux_raw)
 
 		if self.shift is not None:
 			self.shift += shifts
@@ -1475,7 +1614,7 @@ class tessreduce():
 			self.shift = shifts
 
 		if plot:
-			t = self.tpf.time.mjd
+			t = self.mjd
 			ind = np.where(np.diff(t) > .5)[0]
 			shifts[ind,:] = np.nan
 			plt.figure(figsize=(1.5*fig_width,1*fig_width))
@@ -1493,7 +1632,7 @@ class tessreduce():
 
 	def plot_shifts(self,savename=None):
 		import matplotlib.pyplot as plt
-		t = self.tpf.time.mjd
+		t = self.mjd
 		shifts = self.shift
 		ind = np.where(np.diff(t) > .5)[0]
 		shifts[ind,:] = np.nan
@@ -1524,20 +1663,31 @@ class tessreduce():
 
 		"""
 
+		from .helpers import _shift_one, _shift_ref_one
 		shifted = self.flux.copy()
 		nans = ~np.isfinite(shifted)
 		shifted[nans] = 0.
 		if median:
-			for i in range(len(shifted)):
-				if np.nansum(abs(shifted[i])) > 0:
-					shifted[i] = shift(self.ref,[-self.shift[i,1],-self.shift[i,0]], mode='nearest',order=5)
+			if self.parallel:
+				result = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
+					delayed(_shift_ref_one)(self.ref, shifted[i], self.shift[i])
+					for i in range(len(shifted)))
+				shifted = np.array(result)
+			else:
+				for i in range(len(shifted)):
+					shifted[i] = _shift_ref_one(self.ref, shifted[i], self.shift[i])
 			self.flux -= shifted
 
 		else:
-			for i in range(len(shifted)):
-				if np.nansum(abs(shifted[i])) > 0:
-					shifted[i] = shift(shifted[i],[self.shift[i,0],self.shift[i,1]],mode='nearest',order=5)#mode='constant',cval=np.nan)
-			self.flux = shifted
+			if self.parallel:
+				result = Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(
+					delayed(_shift_one)(shifted[i], self.shift[i])
+					for i in range(len(shifted)))
+				self.flux = np.array(result)
+			else:
+				for i in range(len(shifted)):
+					shifted[i] = _shift_one(shifted[i], self.shift[i])
+				self.flux = shifted
 		
 	def bin_data(self,lc=None,time_bin=6/24,frames = None):
 		"""
@@ -1622,7 +1772,7 @@ class tessreduce():
 		if flux is None:
 			flux = self.flux
 
-		t = self.tpf.time.mjd
+		t = self.mjd
 
 		if time_bin is None:
 			bin_size = int(frames)
@@ -1737,14 +1887,14 @@ class tessreduce():
 			print(Warning('sky_out must be odd, adding 1'))
 			sky_in += 1
 			
-		if (ra is not None) & (dec is not None) & (self.tpf is not None):
+		if (ra is not None) & (dec is not None):
 			x,y = self.wcs.all_world2pix(ra,dec,0)
-			x = int(np.round(x,0))
-			y = int(np.round(y,0))
+			x = int(np.round(np.ravel(x)[0],0))
+			y = int(np.round(np.ravel(y)[0],0))
 		elif (x is None) & (y is None):
 			x,y = self.wcs.all_world2pix(self.ra,self.dec,0)
-			x = int(np.round(x,0))
-			y = int(np.round(y,0))
+			x = int(np.round(np.ravel(x)[0],0))
+			y = int(np.round(np.ravel(y)[0],0))
 
 		ap_tar = np.zeros_like(data[0])
 		ap_sky = np.zeros_like(data[0])
@@ -1817,8 +1967,8 @@ class tessreduce():
 					mask = self.orbit_segments == seg
 					tar[mask] += delta
 
-		if self.tpf is not None:
-			time = self.tpf.time.mjd
+		time = self.mjd
+
 		lc = np.array([time, tar, tar_err])
 		sky = np.array([time, sky_med, sky_std])
 		
@@ -1880,8 +2030,8 @@ class tessreduce():
 		maxind = np.where((np.nanmax(lc[1]) == lc[1]))[0]
 		try:
 			maxind = maxind[0]
-		except:
-			pass
+		except (IndexError, ValueError):
+			return
 		d = data[maxind]
 		nonan1 = np.isfinite(d)
 		nonan2 = np.isfinite(d*ap)
@@ -2171,8 +2321,8 @@ class tessreduce():
 			time_ind = np.arange(0,len(self.flux))
 
 		
-		col = self.tpf.column - int(self.size//2) + loc[0] # find column and row, when specifying location on a *say* 90x90 px cutout
-		row = self.tpf.row - int(self.size//2) + loc[1] 
+		col = self.column - int(self.size//2) + loc[0] # find column and row, when specifying location on a *say* 90x90 px cutout
+		row = self.row - int(self.size//2) + loc[1] 
 
 		if isinstance(loc[0], (float, np.floating, np.float32, np.float64)):
 			loc[0] = int(np.round(loc[0],0))
@@ -2188,9 +2338,9 @@ class tessreduce():
 		row = np.max([row,10])
 		col = np.max([col,45])	
 		try:	
-			prf = TESS_PRF(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row) # initialise psf kernel
+			prf = TESS_PRF(self.camera,self.ccd,self.sector,col,row) # initialise psf kernel
 		except:
-			print(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row)
+			print(self.camera,self.ccd,self.sector,col,row)
 			raise ValueError
 		if ref:
 			cutout = (self.flux+self.ref)[time_ind,loc[1]-cutoutSize//2:loc[1]+1+cutoutSize//2,loc[0]-cutoutSize//2:loc[0]+1+cutoutSize//2] # gather cutouts
@@ -2238,8 +2388,8 @@ class tessreduce():
 				raise ValueError(m)
 		inds = np.arange(0,len(xpos))
 		if self.parallel:
-			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_initialise)(self.flux,self.tpf.camera,self.tpf.ccd,
-																						 self.tpf.sector,self.tpf.column,self.tpf.row,
+			prfs, cutouts, ecutouts = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_initialise)(self.flux,self.camera,self.ccd,
+																						 self.sector,self.column,self.row,
 																					 size,[xpos[i],ypos[i]],time_ind) for i in inds))
 		else:
 			prfs = []
@@ -2251,7 +2401,7 @@ class tessreduce():
 		cutouts = np.array(cutouts)
 		print('made cutouts')
 		if self.parallel:
-			flux, pos = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
+			flux, pos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_full)(cutouts[i],prfs[i],self.shift[i],xlim,ylim) for i in inds))
 		else:
 			flux = []
 			pos = []
@@ -2288,8 +2438,8 @@ class tessreduce():
 
 		if epsf is None:
 			if self.epsf is None:
-				col = self.tpf.column - int(self.size//2) + yPix # find column and row, when specifying location on a *say* 90x90 px cutout
-				row = self.tpf.row - int(self.size//2) + xPix
+				col = self.column - int(self.size//2) + yPix # find column and row, when specifying location on a *say* 90x90 px cutout
+				row = self.row - int(self.size//2) + xPix
 				col += 45 # add on the non-science columns
 				row += 1 # add on the non-science row
 				if col > 2090:
@@ -2297,7 +2447,7 @@ class tessreduce():
 				if row > 2040:
 					row = 2040
 
-				self.epsf = simulate_epsf(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row)
+				self.epsf = simulate_epsf(self.camera,self.ccd,self.sector,col,row)
 			epsf = self.epsf
 
 		if local_bkg:
@@ -2337,14 +2487,14 @@ class tessreduce():
 			eflux = np.zeros(len(self.flux)) * np.nan
 			psfphot2 = PSFPhotometry(epsf, fit_shape, finder=None,aperture_radius=1.5,
 									 xy_bounds=(0.05),localbkg_estimator=localbkg_estimator)
-			f,ef = zip(*Parallel(n_jobs=self.num_cores)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
+			f,ef = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot2,init) for i in np.arange(len(cutouts))))
 			f = np.array(f).flatten()
 			ef = np.array(ef).flatten()
 			phot = phot.to_pandas()
 			pos = phot[['x_fit','y_fit']].values + np.array([xPix,yPix]) - size//2
 			epos = phot[['x_err','y_err']].values
 		else:
-			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
+			f,ef,pos,epos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_photutils)(cutouts[i],ecutouts[i],psfphot,init,True) for i in np.arange(len(cutouts))))
 			pos['x_fit'] += xPix - size//2
 			pos['y_fit'] += xPix - size//2
 		
@@ -2408,7 +2558,7 @@ class tessreduce():
 				prf, cutouts, ecutouts = self._psf_initialise(size,(xPix,yPix),ref=(not diff))	# gather base PRF and the array of cutouts data
 				inds = np.arange(len(cutouts))
 				base = create_psf(prf,size)
-				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
+				flux, eflux, pos = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_full)(cutouts[i],base,self.shift[i]) for i in inds))
 
 				#prf, cutouts = self._psf_initialise(size,(xPix,yPix))	# gather base PRF and the array of cutouts data
 				#xShifts = []
@@ -2454,9 +2604,9 @@ class tessreduce():
 				if self.parallel:
 					inds = np.arange(len(cutouts))
 					if self.delta_kernel is not None:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 					else:
-						flux, eflux = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+						flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 				else:
 					for i in range(len(cutouts)):
 						flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2472,9 +2622,9 @@ class tessreduce():
 			if self.parallel:
 				inds = np.arange(len(cutouts))
 				if self.delta_kernel is not None:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order,self.delta_kernel[i]) for i in inds))
 				else:
-					flux, eflux = zip(*Parallel(n_jobs=self.num_cores)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
+					flux, eflux = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(par_psf_flux)(cutouts[i],ecutouts[i],base,self.shift[i],bkg_poly_order) for i in inds))
 			else:
 				for i in range(len(cutouts)):
 					flux += [par_psf_flux(cutouts[i],ecutouts[i],base,self.shift[i])]
@@ -2484,6 +2634,158 @@ class tessreduce():
 				ax.set_ylabel('Flux')
 		flux = np.array(flux)
 		eflux = np.array(eflux)
+		return flux, eflux
+
+
+	def scene_photometry(self,xPix,yPix,size=9,bkg_poly_order=2,snap='ref',
+						  neighbours=True,neighbour_prior_mag_tol=0.5,
+						  include_psf_derivatives=True,diff=None):
+		"""
+		Scene-modelling PSF photometry.
+
+		Fits a fixed (or once-refined) position with a single vectorized linear
+		solve across the *entire* time series, using a 2D polynomial background
+		surface (instead of a flat constant) and optional PSF-derivative columns
+		that absorb poor difference-image subtraction residuals right at the
+		target position. This is an additional, much faster alternative to
+		psf_photometry() for the fixed/near-fixed position case -- it does not
+		replace psf_photometry(), whose per-frame position refit (snap='all')
+		still covers genuine per-frame motion that a fixed-basis linear model
+		cannot represent.
+
+		Parameters
+		----------
+		xPix, yPix : float
+			Pixel location of the target, in the same pixel frame used
+			elsewhere (e.g. psf_photometry, field_calibrate's catalogue col/row).
+		size : int, optional
+			Cutout side length in pixels (should be odd). The default is 9.
+		bkg_poly_order : int, optional
+			Order of the 2D polynomial background surface. 0 reproduces a flat
+			background. The default is 2.
+		snap : {'ref','brightest','fixed'}, optional
+			How the fixed position is chosen. 'ref' (default) refines position
+			once on the reference frame; 'brightest' refines on the highest
+			flux-weighted frame in the cutout; 'fixed' skips position
+			refinement entirely (uses (xPix,yPix) exactly).
+		neighbours : bool, optional
+			If True, nearby sources from the calibration catalogue (self.cat,
+			populated by field_calibrate()/field_calibrate_scene()) within the
+			cutout are modelled as extra PSF columns for deblending, with a
+			ridge prior pulling their fitted flux toward the catalogue-
+			predicted value (see neighbour_prior_mag_tol). If no calibration
+			has been run yet, neighbours are modelled unconstrained and a
+			warning is raised. The default is True.
+		neighbour_prior_mag_tol : float, optional
+			Tolerance (mag) controlling how strongly a neighbour's fitted flux
+			is pulled toward its catalogue-predicted value: smaller values pull
+			harder. The default is 0.5.
+		include_psf_derivatives : bool, optional
+			Add PSF spatial-derivative columns at the target position to absorb
+			sharp subtraction-residual structure from imperfect difference-image
+			alignment/kernel-matching. The default is True.
+		diff : bool, optional
+			If True use the already-differenced flux cube; if False add self.ref
+			back before extracting the cutout. Defaults to self.diff.
+
+		Returns
+		-------
+		flux, eflux : array_like
+			Flux and formal per-frame flux error, length = n frames.
+		"""
+		from . import scene_photom as sp
+
+		if diff is None:
+			diff = self.diff
+
+		xPix = int(np.round(xPix))
+		yPix = int(np.round(yPix))
+
+		col = self.tpf.column - int(self.size//2) + xPix + 45
+		row = self.tpf.row - int(self.size//2) + yPix + 1
+		col = int(np.clip(col,45,2090))
+		row = int(np.clip(row,10,2040))
+		prf = sp._prf_cache(self.tpf.camera,self.tpf.ccd,self.tpf.sector,col,row,self._prf_path)
+
+		half = size // 2
+		if diff:
+			cutout = self.flux[:,yPix-half:yPix+half+1,xPix-half:xPix+half+1]
+		else:
+			cutout = (self.flux+self.ref)[:,yPix-half:yPix+half+1,xPix-half:xPix+half+1]
+
+		cent = (size-1) / 2.0
+
+		# -- position: fixed, or refined once on a single high-SNR frame -- #
+		if snap == 'ref':
+			ref_ind = self.ref_ind
+		elif snap == 'brightest':
+			weight = np.abs(np.nansum(cutout[:,half-1:half+2,half-1:half+2],axis=(1,2)))
+			weight[~np.isfinite(weight)] = 0
+			ref_ind = int(np.argmax(weight))
+		elif snap == 'fixed':
+			ref_ind = None
+		else:
+			raise ValueError("snap must be one of 'ref','brightest','fixed' for scene_photometry")
+
+		if ref_ind is not None:
+			def build_A(dx,dy):
+				A, _ = sp.build_design_matrix(prf,cent,(dx,dy),[],size,
+											   poly_order=bkg_poly_order,
+											   include_psf_derivatives=include_psf_derivatives)
+				return A
+			target_dxdy = sp.fit_scene_position(build_A,cutout[ref_ind].ravel(),tol_x=1.0,tol_y=1.0)
+		else:
+			target_dxdy = (0.0,0.0)
+
+		# -- neighbours, informed by the calibration catalogue -- #
+		neighbour_dxdys = []
+		expected_flux = np.array([])
+		if neighbours:
+			cat = getattr(self,'cat',None)
+			zp = getattr(self,'zp',None)
+			if (cat is not None) and (zp is not None):
+				mag_col = 'tmag' if 'tmag' in cat.columns else ('rp_ab' if 'rp_ab' in cat.columns else None)
+				if mag_col is not None:
+					dcol = cat['col'].values - xPix
+					drow = cat['row'].values - yPix
+					in_stamp = (np.abs(dcol) <= half) & (np.abs(drow) <= half)
+					is_target = np.hypot(dcol,drow) <= 0.5
+					sel = in_stamp & ~is_target
+					neighbour_dxdys = list(zip(dcol[sel],drow[sel]))
+					if len(neighbour_dxdys) > 0:
+						if diff:
+							# on a differenced cube a static neighbour's true
+							# amplitude is ~0 (it subtracts out against the
+							# reference), not its catalogue absolute flux --
+							# pulling toward the absolute flux here would bias
+							# the fit. Prior toward zero residual instead.
+							expected_flux = np.zeros(sel.sum())
+						else:
+							expected_flux = 10**(-0.4*(cat[mag_col].values[sel]-zp))
+			else:
+				warnings.warn('scene_photometry: neighbours=True but no calibration catalogue/zeropoint '
+							   'is set yet (run field_calibrate() or field_calibrate_scene() first); '
+							   'proceeding with neighbours unconstrained.')
+
+		A, info = sp.build_design_matrix(prf,cent,target_dxdy,neighbour_dxdys,size,
+										  poly_order=bkg_poly_order,
+										  include_psf_derivatives=include_psf_derivatives)
+
+		prior_flux = None
+		prior_strength = None
+		if len(neighbour_dxdys) > 0 and len(expected_flux) == len(neighbour_dxdys):
+			prior_flux = np.zeros(A.shape[1])
+			prior_strength = np.zeros(A.shape[1])
+			for k,idx in enumerate(info['neighbours']):
+				# a non-finite catalogue magnitude must not poison the shared
+				# closed-form solve (one NaN row contaminates every column via
+				# the matrix inverse) -- leave that neighbour unconstrained
+				# (still deblended via its own column, just with no prior).
+				if np.isfinite(expected_flux[k]):
+					prior_flux[idx] = expected_flux[k]
+					prior_strength[idx] = 1.0 / (neighbour_prior_mag_tol**2)
+
+		flux, eflux, coeffs = sp.fit_scene_lightcurve(cutout,A,prior_flux=prior_flux,prior_strength=prior_strength)
 		return flux, eflux
 
 
@@ -2498,8 +2800,8 @@ class tessreduce():
 
 		Updates self.flux in place and stores self.orbit_segments.
 		"""
-		sector = (self.tpf.sector if self.tpf is not None else None) or self.sector
-		camera = (self.tpf.camera if self.tpf is not None else None) or self.camera
+		sector = self.sector
+		camera = self.camera
 		flux, segments, orbit_refs = orbit_ref_subtract(deepcopy(self.flux), self.mjd,
 														sector=sector, camera=camera,
 														vector_path=self._vector_path)
@@ -2519,7 +2821,7 @@ class tessreduce():
 		mask = self.mask == 1 
 
 		if self.parallel:
-			d, kernel = zip(*Parallel(n_jobs=self.num_cores)(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
+			d, kernel = zip(*Parallel(n_jobs=self.num_cores, backend=self.backend, verbose=self._joblib_verbose)(delayed(parallel_delta_diff)(frame,self.ref,mask,size) for frame in flux))
 		else:
 			d = []
 			kernel = []
@@ -2612,7 +2914,7 @@ class tessreduce():
 			self.get_ref(ref_start,ref_stop)
 			_times['reference frame'] = time.perf_counter() - _t
 			if self.verbose > 0:
-				print('made reference')
+				print(f'made reference ({_times["reference frame"]:.2f}s)')
 			# make source mask
 			_t = time.perf_counter()
 			if mask is None:
@@ -2622,32 +2924,34 @@ class tessreduce():
 				if frac < 0.05:
 					print('!!!WARNING!!! mask is too dense, lowering mask_scale to 0.5, and raising maglim to 15. Background quality will be reduced.')
 					self.make_mask(catalogue_path=self._catalogue_path,maglim=15,strapsize=7,scale=0.2)
-				if self.verbose > 0:
-					print('made source mask')
+				_mask_msg = 'made source mask'
 			else:
 				self.mask = mask
-				if self.verbose > 0:
-					print('assigned source mask')
+				_mask_msg = 'assigned source mask'
 			if moving_mask is not None:
 					moving_mask = moving_mask > 0
 					temp = np.zeros_like(self.flux,dtype=int)
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
 			_times['source mask'] = time.perf_counter() - _t
+			if self.verbose > 0:
+				print(f'{_mask_msg} ({_times["source mask"]:.2f}s)')
 			# calculate background for each frame
 			if self.verbose > 0:
 				print('calculating background')
 			
 			# calculate the background
 			#self.flux -= self.ref
+			if self.verbose > 0:
+				print('background pass 1...')
 			_t = time.perf_counter()
 			self.background(rerun_negative=True)
-			#self.flux += self.ref
 			self.flux -= self.bkg
 			_times['background (pass 1)'] = time.perf_counter() - _t
+			if self.verbose > 0:
+				print(f'background pass 1 done ({_times["background (pass 1)"]:.2f}s)')
 
 			if np.isnan(self.bkg).all():
-				# check to see if the background worked
 				raise ValueError('bkg all nans')
 			
 			# flux = strip_units(self.flux)
@@ -2663,7 +2967,7 @@ class tessreduce():
 				raise ValueError('flux all nans')
 
 			_t = time.perf_counter()
-			if self.align:
+			if self.align and self.shift is None:
 				if self.verbose > 0:
 					print('aligning images')
 
@@ -2675,7 +2979,7 @@ class tessreduce():
 				elif self._shift_method == 'sep_core':
 					from .sep_aligner import SepAligner
 					aligner = SepAligner.from_tessreduce(self)
-					aligner.run()
+					aligner.run(verbose=self._joblib_verbose)
 					if self._smooth_motion:
 						aligner.smooth_shift(time=self.mjd,
 											 gap_thresh=0.5, # days
@@ -2697,18 +3001,23 @@ class tessreduce():
 				# 		self.centroids_shifts_starfind()
 				# 	elif self._shift_method == 'minimize':
 				# 		self.fit_shift()
-			else:
+			elif self.shift is None:
 				self.shift = np.zeros((len(self.flux),2))
+
 			_times['alignment'] = time.perf_counter() - _t
-			
+			if self.verbose > 0:
+				print(f'alignment done ({_times["alignment"]:.2f}s)')
+
+			_bad_frames = np.nansum(self.flux_raw,axis=(1,2))==0
+
 			if not self.diff:
 				if self.align:
 					_t = time.perf_counter()
 					self.shift_images()
-					self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
+					self.flux[_bad_frames] = np.nan
 					_times['image shifting'] = time.perf_counter() - _t
 					if self.verbose > 0:
-						print('images shifted')
+						print(f'images shifted ({_times["image shifting"]:.2f}s)')
 					#if self.kernel_match:
 					#	self.kernel_matching(diff=False)
 
@@ -2717,8 +3026,8 @@ class tessreduce():
 					print('!!Re-running for difference image!!')
 				# reseting to do diffim
 				_t = time.perf_counter()
-				self.flux = strip_units(self.tpf.flux)
-				self.flux = self.flux / self.qe
+
+				self.flux = self.flux_raw / self.qe
 
 				if self.align:
 					self.shift_images()
@@ -2728,13 +3037,13 @@ class tessreduce():
 				self._flux_aligned = deepcopy(self.flux)
 				if test_seed is not None:
 					self.flux += test_seed
-				self.flux[np.nansum(self.tpf.flux.value,axis=(1,2))==0] = np.nan
+				self.flux[_bad_frames] = np.nan
 				# subtract reference
 				if self._ref_type.lower() == 'single':
 					self.ref = deepcopy(self.flux[self.ref_ind])
 				elif self._ref_type.lower() == 'stack':
 					self.stack_ref()
-				self.ref -= np.nanmin(self.ref)
+				self.ref -= np.nanpercentile(self.ref, 1)
 				self.flux -= self.ref
 
 				# self.ref -= self.bkg[self.ref_ind]
@@ -2760,27 +3069,29 @@ class tessreduce():
 					temp[:,:,:] = self.mask
 					self.mask = temp | moving_mask
 				_times['difference imaging setup'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'diff setup done ({_times["difference imaging setup"]:.2f}s)')
 
-				if self.verbose > 0:
-					print('remade mask')
-				# background
-				if self.verbose > 0:
-					print('background')
 				self.bkg_orig = deepcopy(self.bkg)
+				if self.verbose > 0:
+					print('background pass 2...')
 				_t = time.perf_counter()
 				self.background(calc_qe = False,strap_iso = False,source_hunt=self._sourcehunt,
 								gauss_smooth=self._bkg_gauss_sigma,interpolate=False,
 								rerun_negative=False,rerun_diff=True,blend_dynamic=True)
-				# self._grad_bkg_clip()
 				self.flux -= self.bkg
 				_times['background (pass 2)'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'background pass 2 done ({_times["background (pass 2)"]:.2f}s)')
 
 				if self.corr_correction:
 					_t = time.perf_counter()
 					if self.verbose > 0:
-						print('background correlation correction')
+						print('correlation correction...')
 					self.correlation_corrector()
 					_times['correlation correction'] = time.perf_counter() - _t
+					if self.verbose > 0:
+						print(f'correlation correction done ({_times["correlation correction"]:.2f}s)')
 				if self.kernel_match:
 					self.kernel_matching(diff=self.diff)
 					if self.verbose > 0:
@@ -2793,14 +3104,19 @@ class tessreduce():
 
 			if self.calibrate:
 				_t = time.perf_counter()
-				print('field calibration')
+				if self.verbose > 0:
+					print('field calibration...')
 				self.field_calibrate()
 				_times['field calibration'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'field calibration done ({_times["field calibration"]:.2f}s)')
 
 			if self._create_lc:
 				_t = time.perf_counter()
 				self.lc, self.sky = self.diff_lc(plot=self.plot,diff=self.diff,tar_ap=tar_ap,sky_in=sky_in,sky_out=sky_out)
 				_times['light curve'] = time.perf_counter() - _t
+				if self.verbose > 0:
+					print(f'light curve extracted ({_times["light curve"]:.2f}s)')
 
 			if self.imaging:
 				# if self.verbose > 0:
@@ -2816,6 +3132,15 @@ class tessreduce():
 
 		except Exception:
 			print(traceback.format_exc())
+
+		if self._cache_path is not None:
+			try:
+				os.remove(self._cache_path)
+				if self.verbose > 0:
+					print('Cache removed')
+			except OSError:
+				print(f'Failed to remove cache: {self._cache_path}')
+			self._cache_path = None
 
 		
 	def external_photometry(self,size=50,phot=None):
@@ -2859,7 +3184,7 @@ class tessreduce():
 		
 		# hack solution for new lightkurve
 		flux = strip_units(self.flux)
-		t = self.tpf.time.mjd
+		t = self.mjd
 
 		if type(aperture) == type(None):
 			aper = np.zeros_like(flux[0])
@@ -3317,13 +3642,13 @@ class tessreduce():
 		if self.dec < -30:
 			if self.verbose > 0:
 				print('target is below -30 dec, calibrating to SkyMapper photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='skymapper')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='skymapper')
 			table = Skymapper_df(table)
 			system = 'skymapper'
 		else:
 			if self.verbose > 0:
 				print('target is above -30 dec, calibrating to PS1 photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='ps1')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='ps1')
 			system = 'ps1'
 
 		if self.diff:
@@ -3455,7 +3780,7 @@ class tessreduce():
 		if self.dec < -30:
 			if self.verbose > 0:
 				print('target is below -30 dec, calibrating to SkyMapper photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='skymapper')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='skymapper')
 			system = 'skymapper'
 			if table is None:
 				print('WARNING: SkyMapper unavailable, skipping field calibration.')
@@ -3463,7 +3788,7 @@ class tessreduce():
 		else:
 			if self.verbose > 0:
 				print('target is above -30 dec, calibrating to PS1 photometry.')
-			table = Get_Catalogue(self.tpf,Catalog='ps1')
+			table = Get_Catalogue(self.ra,self.dec,self.flux.shape,Catalog='ps1')
 			system = 'ps1'
 		x,y = self.wcs.all_world2pix(table.RAJ2000.values,table.DEJ2000.values,0)
 		table['col'] = x
@@ -3652,7 +3977,7 @@ class tessreduce():
 			plt.gca().xaxis.set_major_locator(plt.MaxNLocator(6))
 
 			plt.subplot(122)
-			plt.plot(self.tpf.time.mjd[mask],mzp[mask],'.',alpha=0.5)
+			plt.plot(self.mjd[mask],mzp[mask],'.',alpha=0.5)
 			#plt.axhspan(averager.mean-averager.stdev,averager.mean+averager.stdev,alpha=0.3,color='C1')
 			#plt.axhline(averager.mean,color='C1')
 			#plt.axhspan(med-std,med+std,alpha=0.3,color='C1')
@@ -3675,7 +4000,7 @@ class tessreduce():
 
 		else:
 			zp = np.nanmedian(zp,axis=0)
-			mzp,stdzp = smooth_zp(zp, self.tpf.time.mjd)
+			mzp,stdzp = smooth_zp(zp, self.mjd)
 			compare = (abs(mzp-20.44) > 2).any()
 
 		if compare:
@@ -3692,6 +4017,67 @@ class tessreduce():
 			self.tzp = mzp
 			self.tzp_e = stdzp
 
+		return
+
+	def field_calibrate_scene(self,catalog='ps1',mag_lo=None,mag_hi=None,plot=False,**kwargs):
+		"""
+		Scene-modelling photometric calibration.
+
+		Additive alternative to field_calibrate(): both pathways use the shared
+		scene-fit engine in scene_photom.py (real pixel-space deblending, formal
+		per-star error propagation, magnitude-binned robust zeropoint combining)
+		instead of field_calibrate()'s catalog-magnitude-space crowding correction
+		and coarse sanity-check gating. Sets self.zp/self.zp_e/self.tzp/self.tzp_e
+		exactly as field_calibrate() does, so diff_lc/light-curve unit conversion
+		works unchanged with either pathway. Does not touch field_calibrate().
+
+		Parameters
+		----------
+		catalog : {'ps1','gaia'}, optional
+			'ps1' (default) uses PS1 (dec>-30) or SkyMapper (dec<=-30), with the
+			existing Tonry-locus extinction correction and multi-band synthetic-
+			TESS-mag reconstruction -- both already AB. 'gaia' uses Gaia DR3
+			(queried via astroquery, matching tessreduce's existing catalogue
+			convention), calibrated directly against Rp with the standard
+			Vega->AB offset applied; no extinction step for this pathway.
+		mag_lo, mag_hi : float, optional
+			Magnitude range for the calibration sample. Defaults are pathway-
+			specific (8.5-16.0 for PS1/SkyMapper tmag, 11.0-15.5 for Gaia rp_ab).
+		plot : bool, optional
+			Passed through to the extinction fit (PS1/SkyMapper pathway only).
+		**kwargs
+			Forwarded to field_calibration._calibrate_common (e.g.
+			iso_radius_pix, stamp_size, poly_order, refine_iter, max_zp_err).
+
+		On failure (too few good stars, fits don't converge) a warning is
+		raised and self.zp/self.tzp fall back to 20.6 (self.zp_e/self.tzp_e=0.1),
+		rather than raising an exception.
+
+		Assigns
+		-------
+		self.zp/tzp : float
+			AB photometric zeropoint.
+		self.zp_e/tzp_e : float
+			Error in the photometric zeropoint.
+		self.cat : pandas.DataFrame
+			Calibration catalogue with pixel position (col,row) and either
+			tmag (PS1/SkyMapper pathway) or rp_ab (Gaia pathway).
+		"""
+		from . import field_calibration as fc
+
+		if catalog == 'ps1':
+			zp_ab, zp_err = fc.calibrate_ps1_skymapper(self,mag_lo=mag_lo,mag_hi=mag_hi,plot=plot,**kwargs)
+		elif catalog == 'gaia':
+			mag_lo = 11.0 if mag_lo is None else mag_lo
+			mag_hi = 15.5 if mag_hi is None else mag_hi
+			zp_ab, zp_err = fc.calibrate_gaia(self,mag_lo=mag_lo,mag_hi=mag_hi,plot=plot,**kwargs)
+		else:
+			raise ValueError(f"catalog must be 'ps1' or 'gaia', got {catalog!r}")
+
+		self.zp = zp_ab
+		self.zp_e = zp_err
+		self.tzp = zp_ab
+		self.tzp_e = zp_err
 		return
 
 	def to_mag(self,zp=None,zp_e=0):

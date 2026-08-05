@@ -559,6 +559,7 @@ class SepAligner:
                  ref:          np.ndarray,
                  flux:         np.ndarray,
                  n_jobs:       int = -1,
+                 backend:      str = 'loky',
                  thresh:       float = 3.0,
                  sat_frac:     float = 0.7,
                  ell_max:      float = 0.5,
@@ -581,6 +582,7 @@ class SepAligner:
         self.ref = ref
         self.flux = flux
         self.n_jobs = n_jobs
+        self.backend = backend
         self.thresh = thresh
         self.sat_frac = sat_frac
         self.ell_max = ell_max
@@ -645,6 +647,7 @@ class SepAligner:
         inst = cls(ref=np.asarray(tr.ref),
                    flux=np.asarray(tr.flux),
                    n_jobs=kwargs.pop('n_jobs', n_jobs),
+                   backend=kwargs.pop('backend', getattr(tr, 'backend', 'loky')),
                    pixel_mask=kwargs.pop('pixel_mask', tr_mask),
                    source_mask=kwargs.pop('source_mask', tr_source_mask),
                    **kwargs)
@@ -703,7 +706,7 @@ class SepAligner:
             self._sub_ref, cores, positions, np.asarray(weights), p['core_half'])
 
         results = Parallel(n_jobs=self.n_jobs, verbose=verbose,
-                           backend='loky')(
+                           backend=self.backend)(
             delayed(_align_one_frame)(
                 t, self.flux[t],
                 ref_comp, w_cols,

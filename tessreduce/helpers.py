@@ -166,29 +166,37 @@ def unknown_mask(image):
 	return mask
 
 
+def _shift_one(frame, s):
+	if np.nansum(abs(frame)) > 0:
+		return shift(frame, [s[0], s[1]], mode='nearest', order=5)
+	return frame
+
+def _shift_ref_one(ref, frame_for_check, s):
+	if np.nansum(abs(frame_for_check)) > 0:
+		return shift(ref, [-s[1], -s[0]], mode='nearest', order=5)
+	return frame_for_check
+
 def parallel_bkg3(data,mask):
 	data = deepcopy(data)
 	data[mask] = np.nan
 	estimate = inpaint.inpaint_biharmonic(data,mask)
 	return estimate
 
-def _background2d_frame(frame, box_size, filter_size, sc, estimator, mask=None):
-	from photutils.background import Background2D
+def _background2d_frame(frame, box_size, filter_size, sigma, maxiters, mask=None):
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
 	try:
 		return Background2D(frame, box_size=box_size, filter_size=filter_size,
-							sigma_clip=sc, bkg_estimator=estimator,
+							sigma_clip=sc, bkg_estimator=MedianBackground(),
 							mask=mask, fill_value=0.0,
 							exclude_percentile=50).background
 	except Exception:
 		return np.full_like(frame, np.nanmedian(frame))
 
-def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None):
-	from photutils.background import MedianBackground
-	from astropy.stats import SigmaClip
-	sc = SigmaClip(sigma=sigma, maxiters=maxiters)
-	estimator = MedianBackground()
-	return np.array(Parallel(n_jobs=n_jobs)(
-		delayed(_background2d_frame)(frame, box_size, filter_size, sc, estimator, mask)
+def parallel_background2d(cube, box_size=5, filter_size=3, sigma=3, maxiters=5, n_jobs=-1, mask=None, backend='loky', verbose=0):
+	return np.array(Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_background2d_frame)(frame, box_size, filter_size, sigma, maxiters, mask)
 		for frame in cube))
 
 def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
@@ -247,9 +255,9 @@ def Smooth_bkg(data, gauss_smooth=0, interpolate=False, extrapolate=True):
 						gauss_smooth = gauss_smooth * 4
 					estimate = gaussian_filter(estimate,gauss_smooth)
 		else:
-			estimate = np.zeros_like(data) * np.nan	
+			estimate = np.zeros_like(data)
 	else:
-		estimate = np.zeros_like(data) #* np.nan	
+		estimate = np.zeros_like(data)
 
 	return estimate
 
@@ -376,18 +384,20 @@ def difference_shifts(image,ref):#,eimage,eref):
 		s = np.zeros((2)) * np.nan
 	return s
 
-def Smooth_motion(Centroids,tpf,skernel=25):
+def Smooth_motion(Centroids,mjd,flux,skernel=25):
 	"""
-	Calculate the smoothed centroid shift 
+	Calculate the smoothed centroid shift
 
 	Parameters
 	----------
 	Centroids : array
 		centroid shifts from all frames
 
+	mjd : array
+		time of each frame, used to find orbit gaps
 
-	TPF : lightkurve targetpixelfile
-		tpf
+	flux : array
+		flux cube, used to identify padded/empty frames
 
 	Returns
 	-------
@@ -403,11 +413,11 @@ def Smooth_motion(Centroids,tpf,skernel=25):
 	# 	skernel = 25
 	try:
 		try:
-			split = np.where(np.diff(tpf.time.mjd) > 0.5)[0][0] + 1
+			split = np.where(np.diff(mjd) > 0.5)[0][0] + 1
 			# ugly, but who cares
-			ind1 = np.nansum(tpf.flux[:split],axis=(1,2))
+			ind1 = np.nansum(flux[:split],axis=(1,2))
 			ind1 = np.where(ind1 != 0)[0]
-			ind2 = np.nansum(tpf.flux[split:],axis=(1,2))
+			ind2 = np.nansum(flux[split:],axis=(1,2))
 			ind2 = np.where(ind2 != 0)[0] + split
 			smoothed[ind1,0] = savgol_filter(Centroids[ind1,0],skernel,3)
 			smoothed[ind2,0] = savgol_filter(Centroids[ind2,0],skernel,3)
@@ -415,11 +425,11 @@ def Smooth_motion(Centroids,tpf,skernel=25):
 			smoothed[ind1,1] = savgol_filter(Centroids[ind1,1],skernel,3)
 			smoothed[ind2,1] = savgol_filter(Centroids[ind2,1],skernel,3)
 		except:
-			split = np.where(np.diff(tpf.time.mjd) > 0.5)[0][0] + 1
+			split = np.where(np.diff(mjd) > 0.5)[0][0] + 1
 			# ugly, but who cares
-			ind1 = np.nansum(tpf.flux[:split],axis=(1,2))
+			ind1 = np.nansum(flux[:split],axis=(1,2))
 			ind1 = np.where(ind1 != 0)[0]
-			ind2 = np.nansum(tpf.flux[split:],axis=(1,2))
+			ind2 = np.nansum(flux[split:],axis=(1,2))
 			ind2 = np.where(ind2 != 0)[0] + split
 			smoothed[ind1,0] = savgol_filter(Centroids[ind1,0],skernel//2+1,3)
 			smoothed[ind2,0] = savgol_filter(Centroids[ind2,0],skernel//2+1,3)
@@ -1104,20 +1114,27 @@ def Extract_fits(pixelfile):
 		print('OSError ',pixelfile)
 		return
 
-def regional_stats_mask(image,size=90,sigma=3,iters=10):
+def _clip_region(image, rx, ry, sigma, iters):
+	m, me, s = sigma_clipped_stats(image[ry, rx], maxiters=iters)
+	cut = (image[ry, rx] >= me + sigma * s) | (image[ry, rx] <= me - sigma * s)
+	return rx[cut], ry[cut]
+
+def regional_stats_mask(image, size=90, sigma=3, iters=10, n_jobs=1, backend='loky', verbose=0):
 	if size < 30:
 		print('!!! Region size is small !!!')
 	sx, sy = image.shape
 	X, Y = np.ogrid[0:sx, 0:sy]
-	regions = sy//size * (X//size) + Y//size
-	max_reg = np.max(regions)
+	regions = sy // size * (X // size) + Y // size
+	max_reg = int(np.max(regions))
+
+	region_pixels = [np.where(regions == i) for i in range(max_reg + 1)]
 
 	clip = np.zeros_like(image)
-	for i in range(max_reg+1):
-		rx,ry = np.where(regions == i)
-		m,me, s = sigma_clipped_stats(image[ry,rx],maxiters=iters)
-		cut_ind = np.where((image[rx,ry] >= me+sigma*s) | (image[rx,ry] <= me-sigma*s))
-		clip[rx[cut_ind],ry[cut_ind]] = 1
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_clip_region)(image, rx, ry, sigma, iters)
+		for rx, ry in region_pixels)
+	for rx_cut, ry_cut in results:
+		clip[rx_cut, ry_cut] = 1
 	return clip
 
 
@@ -1201,63 +1218,59 @@ def grad_clip_fill_bkg(bkg,sigma=3,max_size=1000):
 	ap = (abs(a) - a_med) > 3*a_std
 	ap = fftconvolve(ap,np.ones((3,3)),mode='same') > 0.8
 
-	b_labeled, b_objects = label(bp) 
-	a_labeled, a_objects = label(ap) 
+	b_labeled, b_objects = label(bp)
+	a_labeled, a_objects = label(ap)
 
-	b_obj_size = []
-	for i in range(b_objects):
-		b_obj_size += [np.sum(b_labeled==i)]
-	b_obj_size = np.array(b_obj_size)
+	# Component sizes via bincount — labels 1..n_objects, index 0 is background
+	b_obj_size = np.bincount(b_labeled.ravel(), minlength=b_objects + 1)
+	a_obj_size = np.bincount(a_labeled.ravel(), minlength=a_objects + 1)
 
-	a_obj_size = []
-	for i in range(a_objects):
-		a_obj_size += [np.sum(a_labeled==i)]
-	a_obj_size = np.array(a_obj_size)
+	# Zero out components outside the valid size range (skip label 0 = background)
+	bad_a = np.where((a_obj_size[1:] >= max_size) | (a_obj_size[1:] <= 9))[0] + 1
+	if len(bad_a) > 0:
+		a_labeled[np.isin(a_labeled, bad_a)] = 0
 
-	for i in range(a_objects):
-		if (a_obj_size[i] >= max_size) | (a_obj_size[i] <= 9):
-			a_labeled[a_labeled==i] = 0
+	bad_b = np.where((b_obj_size[1:] >= max_size) | (b_obj_size[1:] <= 9))[0] + 1
+	if len(bad_b) > 0:
+		b_labeled[np.isin(b_labeled, bad_b)] = 0
 
-	for i in range(b_objects):
-		if (b_obj_size[i] >= max_size) | (b_obj_size[i] <= 9):
-			b_labeled[b_labeled==i] = 0
-			
-			
-	overlap = (a_labeled>0) & (b_labeled>0)
-	y,x = np.where(overlap)
+	overlap = (a_labeled > 0) & (b_labeled > 0)
+	y, x = np.where(overlap)
 
+	good_a = np.unique(a_labeled[y, x])
+	good_b = np.unique(b_labeled[y, x])
 
-	good_a = np.unique(a_labeled[y,x])
-	good_b = np.unique(b_labeled[y,x])
+	# Overlap ratios via bincount — counts per label, then fraction overlapping
+	_a_max = int(a_labeled.max()) + 1 if a_labeled.max() > 0 else 1
+	_b_max = int(b_labeled.max()) + 1 if b_labeled.max() > 0 else 1
+	a_lab_flat = a_labeled.ravel()
+	b_lab_flat = b_labeled.ravel()
+	ov_flat = overlap.ravel().astype(float)
 
-	a_ratio = []
-	for ind in good_a:
-		eh = a_labeled == ind
-		eh2 = eh * overlap
-		ratio = np.sum(eh2) / np.sum(eh)
-		a_ratio += [ratio]
-	a_ratio = np.array(a_ratio)
-		
-		
-	b_ratio = []
-	for ind in good_b:
-		eh = b_labeled == ind 
-		eh2 = eh * overlap
-		ratio = np.sum(eh2) / np.sum(eh)
-		b_ratio += [ratio]
-	b_ratio = np.array(b_ratio)
+	a_sizes = np.bincount(a_lab_flat, minlength=_a_max)
+	a_overlap_counts = np.bincount(a_lab_flat, weights=ov_flat, minlength=_a_max)
+	a_ratio = a_overlap_counts[good_a] / np.maximum(a_sizes[good_a], 1)
 
+	b_sizes = np.bincount(b_lab_flat, minlength=_b_max)
+	b_overlap_counts = np.bincount(b_lab_flat, weights=ov_flat, minlength=_b_max)
+	b_ratio = b_overlap_counts[good_b] / np.maximum(b_sizes[good_b], 1)
 
-	for i in good_a[a_ratio<0.2]: 
-		a_labeled[a_labeled==i] = 0
-	for i in good_b[b_ratio<0.2]: 
-		b_labeled[b_labeled==i] = 0
+	suppress_a = good_a[a_ratio < 0.2]
+	if len(suppress_a) > 0:
+		a_labeled[np.isin(a_labeled, suppress_a)] = 0
+
+	suppress_b = good_b[b_ratio < 0.2]
+	if len(suppress_b) > 0:
+		b_labeled[np.isin(b_labeled, suppress_b)] = 0
+
 	c = (a_labeled + b_labeled) > 0
 
-	c_labeled, c_objects = label(c==0) 
-	for i in range(c_objects):
-		if np.sum(c_labeled==i) < 10:
-			c[c_labeled==i] = 1
+	c_labeled, c_objects = label(c == 0)
+	if c_objects > 0:
+		c_sizes = np.bincount(c_labeled.ravel(), minlength=c_objects + 1)[:c_objects]
+		small = np.where(c_sizes < 10)[0]
+		if len(small) > 0:
+			c[np.isin(c_labeled, small)] = 1
 	
 	#points = fftconvolve(c,np.ones((5,5)),mode='same')
 	points = c>0#oints > 0.8
@@ -1323,29 +1336,30 @@ def fit_strap(data,mask):
 			p[np.isnan(p)] = p2[np.isnan(p)]
 	return p
 
-def parallel_strap_fit(frame,frame_bkg,frame_err,mask,repeats=3,tol=3):
+def _strap_fit_col(col_data, norm_col):
+	d = abs(np.gradient(col_data))
+	m, med, std = sigma_clipped_stats(d, maxiters=10)
+	nm = (d > med + std) * 1
+	nm = np.convolve(nm, np.ones(3), mode='same')
+	nm = (nm == 0)
+	q = fit_strap(norm_col, nm)
+	if len(col_data) > 110:
+		q = savgol_filter(q, 101, 1)
+	else:
+		q[:] = np.nanmedian(q)
+	return q
+
+def parallel_strap_fit(frame, frame_bkg, frame_err, mask, repeats=3, tol=3, n_jobs=1, backend='loky', verbose=0):
 	norm = frame / frame_bkg
-	sind = np.where(np.nansum(mask,axis=0)>0)[0]
+	sind = np.where(np.nansum(mask, axis=0) > 0)[0]
 	qe = np.ones_like(frame)
-	for i in sind:
-		y = frame[:,i]
-		d = abs(np.gradient(y))
-		m, med, std = sigma_clipped_stats(d,maxiters=10)
-		nm = (d > med + std) * 1
-		nm = np.convolve(nm,np.ones(3),mode='same')
-		nm = (nm == 0)
-		#for r in range(repeats):
-		q = fit_strap(norm[:,i],nm)
-		#q /= frame_bkg[:,i]
-		if len(y) > 110:
-			q = savgol_filter(q,101,1)
-		else:
-			mq = np.nanmedian(q)
-			q[:] = mq
-
-		qe[:,i] = q
-
-	#qe[:,np.nanmean((qe-1),axis=) < 5e-3] = 1
+	if len(sind) == 0:
+		return qe
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_strap_fit_col)(frame[:, i], norm[:, i])
+		for i in sind)
+	for col, q in zip(sind, results):
+		qe[:, col] = q
 	return qe
 
 
@@ -1391,11 +1405,201 @@ def parallel_photutils(cutout,e_cutout,psf_phot,init_params=None,return_pos=Fals
 			return np.array([np.nan]), np.array([np.nan])
 
 
+def _fix_bkg_frame(bkg_i, flux_i, bkgmask_i, prev_i, high_bkg_i,
+				   strap, strap_cols, has_straps, src_mask_2d,
+				   eff_box, disk, yy, xx, NY, NX,
+				   n_sigma, anom_box, anom_box_fine, sep_thresh, sep_snr_thresh,
+				   sep_validate, gauss_smooth, bad_bkg_sigma, bad_bkg_min_area):
+	from photutils.background import Background2D, MedianBackground
+	data_src = np.isnan(bkgmask_i) if bkgmask_i is not None else src_mask_2d
+	phot_mask = strap | data_src
+	frame = bkg_i.copy()
+	excess = np.zeros(len(strap_cols))
+	if has_straps and flux_i is not None:
+		_, excess, _ = sigma_clipped_stats((flux_i - frame)[:, strap_cols], axis=0)
+		frame[:, strap_cols] -= excess
+	try:
+		bkg2d = Background2D(frame, box_size=eff_box, filter_size=3,
+							 mask=phot_mask, bkg_estimator=MedianBackground(),
+							 exclude_percentile=50)
+		trend = bkg2d.background
+	except Exception:
+		trend = np.full_like(frame, np.nanmedian(frame))
+	resid = frame - trend
+	valid_mask = ~phot_mask
+
+	def _block_sigma(r, box):
+		sigma = np.full((NY, NX), np.inf, dtype=float)
+		row_starts = [min(r0, NY - box) for r0 in range(0, NY, box)]
+		col_starts = [min(c0, NX - box) for c0 in range(0, NX, box)]
+		for r0 in row_starts:
+			for c0 in col_starts:
+				r1, c1 = r0 + box, c0 + box
+				vals = r[r0:r1, c0:c1][valid_mask[r0:r1, c0:c1]]
+				if vals.size >= 4:
+					m = np.nanmedian(vals)
+					sigma[r0:r1, c0:c1] = 1.4826 * np.nanmedian(np.abs(vals - m))
+		return sigma
+
+	is_high_bkg = bool(high_bkg_i)
+	sharp_mask = np.zeros((NY, NX), dtype=bool)
+	if not is_high_bkg:
+		sigma_coarse = _block_sigma(resid, anom_box)
+		flagged_coarse = (np.abs(resid) > n_sigma * sigma_coarse) & ~phot_mask
+		import sep as _sep
+		lap_abs = np.abs(laplace(frame)).astype(np.float64)
+		_bkg = _sep.Background(lap_abs)
+		lap_sub = lap_abs - _bkg.back()
+		lap_err = _bkg.rms()
+		snr_map = lap_sub / (lap_err + 1e-10)
+		try:
+			objects = _sep.extract(lap_sub, thresh=sep_thresh, err=lap_err)
+		except Exception:
+			objects = []
+		sep_mask = np.zeros((NY, NX), dtype=bool)
+		noise = np.nanmedian(lap_err)
+		for obj in objects:
+			ap_mask = np.zeros((NY, NX), dtype=bool)
+			_sep.mask_ellipse(ap_mask, obj['x'], obj['y'], obj['a'], obj['b'], obj['theta'], r=3.0)
+			if ap_mask.sum() == 0 or snr_map[ap_mask].mean() <= sep_snr_thresh:
+				continue
+			cx, cy = obj['x'], obj['y']
+			dist = np.sqrt((xx - cx)**2 + (yy - cy)**2)
+			true_r = None
+			for r in range(2, 20):
+				ann = (dist >= r - 0.5) & (dist < r + 0.5)
+				if ann.sum() == 0:
+					break
+				if lap_sub[ann].mean() < noise:
+					true_r = r - 1
+					break
+			else:
+				true_r = 19
+			if true_r is None or true_r < 2 or true_r > 5:
+				continue
+			sep_mask |= dist <= true_r
+		lap_med = np.nanmedian(lap_abs)
+		lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
+		is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
+		sharp_mask |= sep_mask
+		if sep_validate:
+			edge_border = np.zeros((NY, NX), dtype=bool)
+			edge_border[0, :] = True; edge_border[-1, :] = True
+			edge_border[:, 0] = True; edge_border[:, -1] = True
+			labeled, n_comp = label(flagged_coarse)
+			if n_comp > 0:
+				lab_flat = labeled.ravel()
+				touches_edge = np.zeros(n_comp + 1, dtype=bool)
+				touches_sep_lbl = np.zeros(n_comp + 1, dtype=bool)
+				touches_sharp_lbl = np.zeros(n_comp + 1, dtype=bool)
+				np.bitwise_or.at(touches_edge, lab_flat, edge_border.ravel())
+				np.bitwise_or.at(touches_sep_lbl, lab_flat, sep_mask.ravel())
+				np.bitwise_or.at(touches_sharp_lbl, lab_flat, is_sharp.ravel())
+				is_sharp_lbl = ~(touches_edge & ~touches_sep_lbl) & touches_sharp_lbl & touches_sep_lbl
+				is_sharp_lbl[0] = False
+				sharp_mask |= is_sharp_lbl[labeled]
+		else:
+			sharp_mask |= flagged_coarse & is_sharp
+		smooth_mask = flagged_coarse & ~sharp_mask
+		any_anom = sharp_mask.any() or smooth_mask.any()
+		if any_anom:
+			eff_fine = max(min(anom_box_fine, min(NY, NX) // 2), 4)
+			try:
+				bkg2d_fine = Background2D(frame, box_size=eff_fine, filter_size=3,
+										 mask=phot_mask | sharp_mask, bkg_estimator=MedianBackground(),
+										 exclude_percentile=50)
+				trend_fine = bkg2d_fine.background
+			except Exception:
+				trend_fine = trend
+			if sharp_mask.any():
+				frame[sharp_mask & ~phot_mask] = trend_fine[sharp_mask & ~phot_mask]
+			resid_fine = frame - trend_fine
+			sigma_fine = _block_sigma(resid_fine, anom_box_fine)
+			flagged_fine = (np.abs(resid_fine) > n_sigma * sigma_fine) & ~phot_mask
+			confirmed = smooth_mask & flagged_fine
+			if confirmed.any():
+				dilated = binary_dilation(confirmed, structure=disk) & ~phot_mask
+				frame[dilated] = trend_fine[dilated]
+	if prev_i is not None and flux_i is not None:
+		resid_new = np.abs(flux_i - frame)
+		resid_prev = np.abs(flux_i - prev_i)
+		delta = resid_new - resid_prev
+		_, _, scale = sigma_clipped_stats(resid_prev)
+		w = np.clip(delta / (scale + 1e-10), 0, 1)
+		w_zero = (w == 0)
+		if w_zero.any():
+			w_med = median_filter(w_zero.astype(float), size=7)
+			diff_mask = w_zero & ~(w_med > 0.5)
+			w[w_med > 0.5] = 0
+			if diff_mask.any():
+				w[diff_mask] = np.nan
+				_, idx = distance_transform_edt(np.isnan(w), return_indices=True)
+				w[diff_mask] = w[tuple(idx[:, diff_mask])]
+		w[sharp_mask] = 0.0
+		w[phot_mask] = 0.0
+		frame = (1 - w) * frame + w * prev_i
+	smooth_sigma = 2.0 if is_high_bkg else gauss_smooth
+	fixed = gaussian_filter(frame, sigma=smooth_sigma)
+	if has_straps and flux_i is not None:
+		_, excess, _ = sigma_clipped_stats((flux_i - fixed)[:, strap_cols], axis=0)
+		fixed[:, strap_cols] += excess
+	lap_abs = np.abs(laplace(fixed))
+	lap_med = np.nanmedian(lap_abs)
+	lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
+	high_lap = lap_abs > lap_med + bad_bkg_sigma * 1.4826 * lap_mad
+	labeled_lap, n_lap = label(high_lap)
+	if n_lap > 0:
+		areas = np.bincount(labeled_lap.ravel(), minlength=n_lap + 1)
+		large = np.flatnonzero(areas[1:] >= bad_bkg_min_area) + 1
+		bad_bkg_mask = np.isin(labeled_lap, large) if len(large) > 0 else np.zeros((NY, NX), dtype=bool)
+	else:
+		bad_bkg_mask = np.zeros((NY, NX), dtype=bool)
+	return fixed, excess, sharp_mask, bad_bkg_mask
+
+
+def _fit_residual_bkg(residual, exclude_mask, res_box, n_sigma):
+	from photutils.background import Background2D, MedianBackground
+	from astropy.stats import SigmaClip
+	if (~exclude_mask).sum() < 4:
+		return np.zeros_like(residual)
+	sc = SigmaClip(sigma=3.0, maxiters=5)
+	finite_vals = residual[~exclude_mask & np.isfinite(residual)]
+	med = np.nanmedian(finite_vals) if finite_vals.size > 0 else 0.0
+	std = np.nanstd(finite_vals) if finite_vals.size > 0 else 0.0
+	transient_mask = exclude_mask | (np.abs(residual - med) > 5 * std)
+	try:
+		b = Background2D(residual, box_size=res_box, filter_size=3,
+						 sigma_clip=sc, bkg_estimator=MedianBackground(),
+						 mask=transient_mask, fill_value=0.0)
+		corr = b.background
+	except Exception:
+		valid = residual[~transient_mask]
+		corr = np.full_like(residual, np.nanmedian(valid) if valid.size > 0 else 0.0)
+	corr_resid = residual - corr
+	_, corr_med, corr_std = sigma_clipped_stats(corr_resid[~exclude_mask])
+	flagged = np.abs(corr_resid) > n_sigma * corr_std
+	if flagged.any():
+		lap_abs = np.abs(laplace(corr_resid))
+		lap_med = np.nanmedian(lap_abs)
+		lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
+		is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
+		labeled_c, n_c = label(flagged)
+		if n_c > 0:
+			lab_flat = labeled_c.ravel()
+			comp_sizes = np.bincount(lab_flat, minlength=n_c + 1)
+			sharp_counts = np.bincount(lab_flat, weights=is_sharp.ravel(), minlength=n_c + 1)
+			sharp_frac = sharp_counts / np.maximum(comp_sizes, 1)
+			suppress = np.flatnonzero(sharp_frac[1:] >= 0.3) + 1
+			if len(suppress) > 0:
+				corr[np.isin(labeled_c, suppress)] = 0.0
+	return corr
+
+
 def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, n_sigma=5.0,
 							  box_size=16, anom_box=30, anom_box_fine=4, dilate_r=2, gauss_smooth=2,
 							  sep_thresh=3.0, sep_snr_thresh=2.0, sep_validate=True,
 							  high_bkg_frames=None, high_bkg_thresh=200.0,
-							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1):
+							  bad_bkg_sigma=10.0, bad_bkg_min_area=100, n_jobs=-1, backend='loky', verbose=0):
 	"""
 	Fix anomalies (asteroids, cosmic rays) in a background cube.
 
@@ -1454,227 +1658,41 @@ def fix_background_anomalies(bkg, mask, flux=None, bkg_prev=None, bkgmask=None, 
 	yr, xr = np.ogrid[-dilate_r:dilate_r+1, -dilate_r:dilate_r+1]
 	disk = xr**2 + yr**2 <= dilate_r**2
 	yy, xx = np.mgrid[:NY, :NX]
-	def _process(i):
-		if bkgmask_arr is not None:
-			data_src = np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
-		else:
-			data_src = src_mask_2d
-		phot_mask = strap | data_src
 
-		frame = bkg[i].copy()
-		excess = np.zeros(len(strap_cols))
+	def _bkgmask_i(i):
+		if bkgmask_arr is None:
+			return None
+		return bkgmask_arr[i] if bkgmask_arr.ndim == 3 else bkgmask_arr
 
-		if has_straps and flux is not None:
-			_, excess, _ = sigma_clipped_stats((flux[i] - frame)[:, strap_cols], axis=0)
-			frame[:, strap_cols] -= excess
-
-		try:
-			bkg2d = Background2D(frame, box_size=eff_box, filter_size=3,
-								 mask=phot_mask, bkg_estimator=MedianBackground(),
-								 exclude_percentile=50)
-			trend = bkg2d.background
-		except Exception:
-			trend = np.full_like(frame, np.nanmedian(frame))
-
-		resid = frame - trend
-
-		valid_mask = ~phot_mask
-
-		def _block_sigma(r, box):
-			sigma = np.full((NY, NX), np.inf, dtype=float)
-			row_starts = [min(r0, NY - box) for r0 in range(0, NY, box)]
-			col_starts = [min(c0, NX - box) for c0 in range(0, NX, box)]
-			for r0 in row_starts:
-				for c0 in col_starts:
-					r1, c1 = r0 + box, c0 + box
-					vals = r[r0:r1, c0:c1][valid_mask[r0:r1, c0:c1]]
-					if vals.size >= 4:
-						m = np.nanmedian(vals)
-						sigma[r0:r1, c0:c1] = 1.4826 * np.nanmedian(np.abs(vals - m))
-			return sigma
-
-		is_high_bkg = (high_bkg_frames is not None) and bool(high_bkg_frames[i])
-
-		sharp_mask = np.zeros((NY, NX), dtype=bool)
-
-		if not is_high_bkg:
-			sigma_coarse = _block_sigma(resid, anom_box)
-			flagged_coarse = (np.abs(resid) > n_sigma * sigma_coarse) & ~phot_mask
-
-			# Build SEP source mask on |Laplacian(frame)|.
-			import sep as _sep
-			lap_abs = np.abs(laplace(frame)).astype(np.float64)
-			_bkg = _sep.Background(lap_abs)
-			lap_sub = lap_abs - _bkg.back()
-			lap_err = _bkg.rms()
-			snr_map = lap_sub / (lap_err + 1e-10)
-			try:
-				objects = _sep.extract(lap_sub, thresh=sep_thresh, err=lap_err)
-			except Exception:
-				objects = []
-			sep_mask = np.zeros((NY, NX), dtype=bool)
-			noise = np.nanmedian(lap_err)
-			for obj in objects:
-				ap_mask = np.zeros((NY, NX), dtype=bool)
-				_sep.mask_ellipse(ap_mask, obj['x'], obj['y'], obj['a'], obj['b'], obj['theta'], r=3.0)
-				if ap_mask.sum() == 0 or snr_map[ap_mask].mean() <= sep_snr_thresh:
-					continue
-				cx, cy = obj['x'], obj['y']
-				true_r = None
-				for r in range(2, 20):
-					ann = (np.sqrt((xx - cx)**2 + (yy - cy)**2) >= r - 0.5) & \
-						  (np.sqrt((xx - cx)**2 + (yy - cy)**2) < r + 0.5)
-					if ann.sum() == 0:
-						break
-					if lap_sub[ann].mean() < noise:
-						true_r = r - 1
-						break
-				else:
-					true_r = 19
-				if true_r is None or true_r < 2 or true_r > 5:
-					continue
-				circ = np.sqrt((xx - cx)**2 + (yy - cy)**2) <= true_r
-				sep_mask |= circ
-
-			lap_med = np.nanmedian(lap_abs)
-			lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
-			is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
-
-			sharp_mask |= sep_mask
-
-			if sep_validate:
-				edge_border = np.zeros((NY, NX), dtype=bool)
-				edge_border[0, :] = True; edge_border[-1, :] = True
-				edge_border[:, 0] = True; edge_border[:, -1] = True
-				labeled, n_comp = label(flagged_coarse)
-				smooth_mask = np.zeros((NY, NX), dtype=bool)
-				for comp_id in range(1, n_comp + 1):
-					comp = labeled == comp_id
-					if (comp & edge_border).any() and not (comp & sep_mask).any():
-						smooth_mask |= comp
-					elif (comp & is_sharp).any() and (comp & sep_mask).any():
-						sharp_mask |= comp
-					else:
-						smooth_mask |= comp
-			else:
-				sharp_mask |= flagged_coarse & is_sharp
-
-			smooth_mask = flagged_coarse & ~sharp_mask
-
-			# Fit fine Background2D excluding sharp anomaly pixels.
-			any_anom = sharp_mask.any() or smooth_mask.any()
-			if any_anom:
-				eff_fine = max(min(anom_box_fine, min(NY, NX) // 2), 4)
-				try:
-					bkg2d_fine = Background2D(frame, box_size=eff_fine, filter_size=3,
-											 mask=phot_mask | sharp_mask, bkg_estimator=MedianBackground(),
-											 exclude_percentile=50)
-					trend_fine = bkg2d_fine.background
-				except Exception:
-					trend_fine = trend
-
-				if sharp_mask.any():
-					frame[sharp_mask & ~phot_mask] = trend_fine[sharp_mask & ~phot_mask]
-
-				resid_fine = frame - trend_fine
-				sigma_fine = _block_sigma(resid_fine, anom_box_fine)
-				flagged_fine = (np.abs(resid_fine) > n_sigma * sigma_fine) & ~phot_mask
-				confirmed = smooth_mask & flagged_fine
-				if confirmed.any():
-					dilated = binary_dilation(confirmed, structure=disk) & ~phot_mask
-					frame[dilated] = trend_fine[dilated]
-
-		# Blend toward bkg_prev before smoothing so smoothing is not overridden.
-		if bkg_prev is not None and flux is not None:
-			flux_frame = flux[i]
-			prev_frame = np.asarray(bkg_prev)[i]
-			resid_new = np.abs(flux_frame - frame)
-			resid_prev = np.abs(flux_frame - prev_frame)
-			delta = resid_new - resid_prev
-			_, _, scale = sigma_clipped_stats(resid_prev)
-			w = np.clip(delta / (scale + 1e-10), 0, 1)
-			w_zero = (w == 0)
-			if w_zero.any():
-				w_med = median_filter(w_zero.astype(float), size=7)
-				diff_mask = w_zero & ~(w_med > 0.5)
-				w[w_med > 0.5] = 0
-				if diff_mask.any():
-					w[diff_mask] = np.nan
-					_, idx = distance_transform_edt(np.isnan(w), return_indices=True)
-					w[diff_mask] = w[tuple(idx[:, diff_mask])]
-			w[sharp_mask] = 0.0
-			w[phot_mask] = 0.0
-			frame = (1 - w) * frame + w * prev_frame
-
-		smooth_sigma = 2.0 if is_high_bkg else gauss_smooth
-		fixed = gaussian_filter(frame, sigma=smooth_sigma)
-
-		if has_straps and flux is not None:
-			_, excess, _ = sigma_clipped_stats((flux[i] - fixed)[:, strap_cols], axis=0)
-			fixed[:, strap_cols] += excess
-
-		lap_abs = np.abs(laplace(fixed))
-		lap_med = np.nanmedian(lap_abs)
-		lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
-		high_lap = lap_abs > lap_med + bad_bkg_sigma * 1.4826 * lap_mad
-		labeled_lap, n_lap = label(high_lap)
-		bad_bkg_mask = np.zeros((NY, NX), dtype=bool)
-		for cid in range(1, n_lap + 1):
-			comp = labeled_lap == cid
-			if comp.sum() >= bad_bkg_min_area:
-				bad_bkg_mask |= comp
-
-		return fixed, excess, sharp_mask, bad_bkg_mask
-
-	results = Parallel(n_jobs=n_jobs, prefer='threads')(delayed(_process)(i) for i in range(T))
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_fix_bkg_frame)(
+			bkg[i],
+			flux[i] if flux is not None else None,
+			_bkgmask_i(i),
+			np.asarray(bkg_prev)[i] if bkg_prev is not None else None,
+			bool(high_bkg_frames[i]) if high_bkg_frames is not None else False,
+			strap, strap_cols, has_straps, src_mask_2d,
+			eff_box, disk, yy, xx, NY, NX,
+			n_sigma, anom_box, anom_box_fine, sep_thresh, sep_snr_thresh,
+			sep_validate, gauss_smooth, bad_bkg_sigma, bad_bkg_min_area,
+		)
+		for i in range(T)
+	)
 	bkg_fixed = np.array([r[0] for r in results])
 	excesses = [r[1] for r in results]
 	sharp_masks = np.array([r[2] for r in results])
 	bad_bkg_masks = np.array([r[3] for r in results])  # (T, NY, NX) bool
 
 	if flux is not None and bkgmask is not None:
-		from astropy.stats import SigmaClip
-		sc = SigmaClip(sigma=3.0, maxiters=5)
 		res_box = min(20, min(NY, NX) // 2)
 		res_box = max(res_box, 4)
 
-		def _fit_residual(residual, exclude_mask):
-			finite_vals = residual[~exclude_mask & np.isfinite(residual)]
-			med = np.nanmedian(finite_vals)
-			std = np.nanstd(finite_vals)
-			transient_mask = exclude_mask | (np.abs(residual - med) > 5 * std)
-			try:
-				b = Background2D(residual, box_size=res_box, filter_size=3,
-								 sigma_clip=sc, bkg_estimator=MedianBackground(),
-								 mask=transient_mask, fill_value=0.0)
-				corr = b.background
-			except Exception:
-				corr = np.full_like(residual, np.nanmedian(residual[~transient_mask]))
-
-			# Apply Laplacian sharp/smooth classification to the correction.
-			# Only suppress corrections in sharp (point-like) regions — smooth
-			# background gradients should be applied.
-			corr_resid = residual - corr
-			_, corr_med, corr_std = sigma_clipped_stats(corr_resid[~exclude_mask])
-			flagged = np.abs(corr_resid) > n_sigma * corr_std
-			if flagged.any():
-				lap_abs = np.abs(laplace(corr_resid))
-				lap_med = np.nanmedian(lap_abs)
-				lap_mad = np.nanmedian(np.abs(lap_abs - lap_med))
-				is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
-				labeled_c, n_c = label(flagged)
-				for cid in range(1, n_c + 1):
-					comp = labeled_c == cid
-					n_sp = (comp & is_sharp).sum()
-					if n_sp / comp.sum() >= 0.3:
-						corr[comp] = 0.0
-			return corr
-
 		residuals = flux - bkg_fixed
-		corrections = Parallel(n_jobs=n_jobs, prefer='threads')(
-			delayed(_fit_residual)(
+		corrections = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+			delayed(_fit_residual_bkg)(
 				residuals[i],
-				np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr)
+				np.isnan(bkgmask_arr[i]) if bkgmask_arr.ndim == 3 else np.isnan(bkgmask_arr),
+				res_box, n_sigma,
 			) for i in range(T)
 		)
 		bkg_fixed += np.array(corrections)
@@ -1776,7 +1794,25 @@ def orbit_ref_subtract(flux, times_mjd, sector=None, camera=None,
 	return result, segments, orbit_refs
 
 
-def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None):
+def _blend_frame(bkg_new_i, bkg_prev_i, delta_i, resid_prev_i, sigma, sharp_mask_i):
+	_, _, scale = sigma_clipped_stats(resid_prev_i)
+	w = np.clip(delta_i / (sigma * scale + 1e-10), 0, 1)
+	w_zero = (w == 0)
+	if w_zero.any():
+		w_med = median_filter(w_zero.astype(float), size=7)
+		diff_mask = w_zero & ~(w_med > 0.5)
+		w[w_med > 0.5] = 0
+		if diff_mask.any():
+			w[diff_mask] = np.nan
+			w = interpolate_replace_nans(w, Gaussian2DKernel(1.0))
+	w = np.where(np.isfinite(w), w, 0.0)
+	if sharp_mask_i is not None:
+		w[sharp_mask_i] = 0.0
+	result = (1 - w) * bkg_new_i + w * bkg_prev_i
+	result = np.where(np.isfinite(result), result, bkg_prev_i)
+	return result
+
+def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=None, n_jobs=1, backend='loky', verbose=0):
 	"""Per-pixel blend bkg_new toward bkg_prev based on residual quality.
 
 	For each pixel, compares |flux - bkg_new| vs |flux - bkg_prev|. Where
@@ -1803,25 +1839,13 @@ def blend_dynamic_background(bkg_new, bkg_prev, flux, sigma=2.0, sharp_masks=Non
 	flux = np.array(flux)
 	resid_new = np.abs(flux - bkg_new)
 	resid_prev = np.abs(flux - bkg_prev)
-	delta = resid_new - resid_prev  # positive = bkg_new is worse
-	_gauss_kernel = Gaussian2DKernel(1.0)
+	delta = resid_new - resid_prev
+	T = bkg_new.shape[0]
+	sharp_list = [sharp_masks[i] if sharp_masks is not None else None for i in range(T)]
 
-	out = bkg_new.copy()
-	for i in range(bkg_new.shape[0]):
-		_, _, scale = sigma_clipped_stats(resid_prev[i])
-		w = np.clip(delta[i] / (sigma * scale + 1e-10), 0, 1)
-
-		w_zero = (w == 0)
-		if w_zero.any():
-			w_med = median_filter(w_zero.astype(float), size=7)
-			diff_mask = w_zero & ~(w_med > 0.5)
-			w[w_med > 0.5] = 0
-			if diff_mask.any():
-				w[diff_mask] = np.nan
-				w = interpolate_replace_nans(w, _gauss_kernel)
-
-		if sharp_masks is not None:
-			w[sharp_masks[i]] = 0.0
-		out[i] = (1 - w) * bkg_new[i] + w * bkg_prev[i]
-	return out
+	results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
+		delayed(_blend_frame)(bkg_new[i], bkg_prev[i], delta[i], resid_prev[i],
+							  sigma, sharp_list[i])
+		for i in range(T))
+	return np.array(results)
 

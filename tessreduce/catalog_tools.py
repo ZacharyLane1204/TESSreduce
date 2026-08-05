@@ -13,7 +13,7 @@ package_directory = os.path.dirname(os.path.abspath(__file__)) + '/'
 
 from .helpers import *
 
-def Get_Catalogue(tpf, Catalog = 'gaia'):
+def Get_Catalogue(ra,dec,shape, Catalog = 'gaia'):
 	"""
 	Get the coordinates and mag of all sources in the field of view from a specified catalogue.
 
@@ -32,10 +32,10 @@ def Get_Catalogue(tpf, Catalog = 'gaia'):
 		coords 	array	coordinates of sources
 		Gmag 	array 	Gmags of sources
 	"""
-	c1 = SkyCoord(tpf.ra, tpf.dec, frame='icrs', unit='deg')
+	c1 = SkyCoord(ra, dec, frame='icrs', unit='deg')
 	# Use pixel scale for query size	
 	pix_scale = 21.0
-	rad = Angle(np.max(tpf.shape[1:]) * pix_scale + 60, "arcsec")
+	rad = Angle(np.max(shape[1:]) * pix_scale + 60, "arcsec")
 	# We are querying with a diameter as the radius, overfilling by 2x.
 	from astroquery.vizier import Vizier
 	Vizier.ROW_LIMIT = -1
@@ -52,10 +52,10 @@ def Get_Catalogue(tpf, Catalog = 'gaia'):
 		raise ValueError(f"{catalog} not recognised as a catalog. Available options: 'gaia', 'dist','ps1'")
 	if Catalog == 'gaia':
 		result = Vizier.query_region(c1, catalog=[catalog],
-							 		 radius=Angle(np.max(tpf.shape[1:]) * pix_scale + 60, "arcsec"),column_filters={'Gmag':'<19'})
+							 		 radius=Angle(np.max(shape[1:]) * pix_scale + 60, "arcsec"),column_filters={'Gmag':'<19'})
 	elif Catalog == 'ps1':
 		result = Vizier.query_region(c1, catalog=[catalog],
-									 radius=Angle(np.max(tpf.shape[1:]) * pix_scale + 60, "arcsec"))
+									 radius=Angle(np.max(shape[1:]) * pix_scale + 60, "arcsec"))
 
 	no_targets_found_message = ValueError('Either no sources were found in the query region '
 										  'or Vizier is unavailable')
@@ -208,7 +208,7 @@ def Get_Gaia_External(ra,dec,size,wcsObj,magnitude_limit = 18, Offset = 10):
 	#Jmag = Jmag[ind]
 	return radecs, Tmag, source
 
-def Get_Gaia(tpf, magnitude_limit = 18, Offset = 10):
+def Get_Gaia(ra,dec,wcs,shape, magnitude_limit = 18, Offset = 10):
 	"""
 	Get the coordinates and mag of all gaia sources in the field of view.
 
@@ -230,18 +230,18 @@ def Get_Gaia(tpf, magnitude_limit = 18, Offset = 10):
 			'ymag','e_ymag','yKmag','e_yKmag','tmag','gaiaid','gaiamag','gaiadist','gaiadist_u','gaiadist_l',
 			'row','col']
 
-	result =  Get_Catalogue(tpf, Catalog = 'gaia')
+	result =  Get_Catalogue(ra,dec,shape, Catalog = 'gaia')
 
 	result = result[result.Gmag < magnitude_limit]
 	if len(result) == 0:
 		raise no_targets_found_message
 	radecs = np.vstack([result['RA_ICRS'], result['DE_ICRS']]).T
-	coords = tpf.wcs.all_world2pix(radecs, 0) ## TODO, is origin supposed to be zero or one?
+	coords = wcs.all_world2pix(radecs, 0) ## TODO, is origin supposed to be zero or one?
 	Gmag = result['Gmag'].values
 	RPmag = result['RPmag'].values
 	#Jmag = result['Jmag']
 	ind = (((coords[:,0] >= -10) & (coords[:,1] >= -10)) &
-		   ((coords[:,0] < (tpf.shape[2] + 10)) & (coords[:,1] < (tpf.shape[1] + 10))))
+		   ((coords[:,0] < (shape[2] + 10)) & (coords[:,1] < (shape[1] + 10))))
 	coords = coords[ind]
 	Gmag = Gmag[ind]
 	RPmag = RPmag[ind]
@@ -270,8 +270,9 @@ def PS1_to_TESS_mag(PS1,ebv = 0):
 	z = mag2flux(PS1.zmag.values - ez,zp)
 	y = mag2flux(PS1.ymag.values - ey,zp)
 	
-	cr = 0.25582823; ci = 0.27609407; cz = 0.35809516
-	cy = 0.11244277; cp = 0.00049096
+	# re-derived via calibrimbore (sauron(band='tess.dat',system='ps1',gr_lims=[-.5,.8]))
+	cr = 0.23693349; ci = 0.34742086; cz = 0.28054228
+	cy = 0.13630491; cp = 0.00036188
 
 	t = (cr*r + ci*i + cz*z + cy*y)*(g/i)**cp
 	t = -2.5*np.log10(t) + zp + et
@@ -295,8 +296,9 @@ def SM_to_TESS_mag(SM,ebv = 0):
 	i = mag2flux(SM.imag.values - ei,zp)
 	z = mag2flux(SM.zmag.values - ez,zp)
 	
-	cr = 0.25825435; ci = 0.35298213
-	cz = 0.39388206; cp = -0.00170817
+	# re-derived via calibrimbore (sauron(band='tess.dat',system='skymapper',gr_lims=[-.5,.8]))
+	cr = 0.25323566; ci = 0.42107837
+	cz = 0.32697125; cp = -0.01408441
 
 	t = (cr*r + ci*i + cz*z)*(g/i)**cp
 	t = -2.5*np.log10(t) + zp + et
@@ -305,7 +307,7 @@ def SM_to_TESS_mag(SM,ebv = 0):
 
 
 
-def Get_PS1(tpf, magnitude_limit = 20, Offset = 10):
+def Get_PS1(ra,dec,wcs,shape, magnitude_limit = 20, Offset = 10):
 	"""
 	Get the coordinates and mag of all PS1 sources in the field of view.
 
@@ -322,7 +324,7 @@ def Get_PS1(tpf, magnitude_limit = 20, Offset = 10):
 		coords 	array	coordinates of sources
 		Gmag 	array 	Gmags of sources
 	"""
-	result =  Get_Catalogue(tpf, Catalog = 'ps1')
+	result =  Get_Catalogue(ra,dec,shape, Catalog = 'ps1')
 	result = result[np.isfinite(result.rmag) & np.isfinite(result.imag)]# & np.isfinite(result.zmag)& np.isfinite(result.ymag)]
 	result = PS1_to_TESS_mag(result)
 	
@@ -331,11 +333,11 @@ def Get_PS1(tpf, magnitude_limit = 20, Offset = 10):
 	if len(result) == 0:
 		raise no_targets_found_message
 	radecs = np.vstack([result['RAJ2000'], result['DEJ2000']]).T
-	coords = tpf.wcs.all_world2pix(radecs, 0) ## TODO, is origin supposed to be zero or one?
+	coords = wcs.all_world2pix(radecs, 0) ## TODO, is origin supposed to be zero or one?
 	Tessmag = result['tmag'].values
 	#Jmag = result['Jmag']
 	ind = (((coords[:,0] >= -Offset) & (coords[:,1] >= -Offset)) & 
-		   ((coords[:,0] < (tpf.shape[1] + Offset)) & (coords[:,1] < (tpf.shape[2] + Offset))))
+		   ((coords[:,0] < (shape[1] + Offset)) & (coords[:,1] < (shape[2] + Offset))))
 	coords = coords[ind]
 	Tessmag = Tessmag[ind]
 	#Jmag = Jmag[ind]
@@ -378,7 +380,7 @@ def Skymapper_df(sm):
 	return df
 
 
-def Unified_catalog(tpf,magnitude_limit=18,offset=10):
+def Unified_catalog(ra,dec,wcs,shape,magnitude_limit=18,offset=10):
 	"""
 	Find all sources present in the TESS field from PS!, and Gaia. Catalogs are cross
 	matched through distance, and Gaia distances are assigned from Gaia ID.
@@ -398,11 +400,11 @@ def Unified_catalog(tpf,magnitude_limit=18,offset=10):
 	pd.options.mode.chained_assignment = None
 	# need to look at how the icrs coords are offset from J2000
 	# Get gaia catalogs 
-	gaia = Get_Catalogue(tpf, Catalog = 'gaia')
-	gaiadist = Get_Catalogue(tpf, Catalog = 'dist')
+	gaia = Get_Catalogue(ra,dec,shape, Catalog = 'gaia')
+	gaiadist = Get_Catalogue(ra,dec,shape, Catalog = 'dist')
 	# Get PS1 and structure it
-	if tpf.dec > -30:
-		ps1 = Get_Catalogue(tpf, Catalog = 'ps1')
+	if dec > -30:
+		ps1 = Get_Catalogue(ra,dec,shape, Catalog = 'ps1')
 		ps1 = ps1[np.isfinite(ps1.rmag) & np.isfinite(ps1.imag)]# & np.isfinite(result.zmag)& np.isfinite(result.ymag)]
 		ps1 = PS1_to_TESS_mag(ps1)
 		keep = ['objID','RAJ2000', 'DEJ2000','e_RAJ2000','e_DEJ2000','gmag', 'e_gmag', 'gKmag',
@@ -412,7 +414,7 @@ def Unified_catalog(tpf,magnitude_limit=18,offset=10):
 			   'tmag']
 		result = ps1[keep]
 	else:
-		sm = Get_Catalogue(tpf, Catalog = 'skymapper')
+		sm = Get_Catalogue(ra,dec,shape, Catalog = 'skymapper')
 		sm = Skymapper_df(sm)
 		sm = sm[np.isfinite(sm.rmag) & np.isfinite(sm.imag)]# & np.isfinite(result.zmag)& np.isfinite(result.ymag)]
 		sm = PS1_to_TESS_mag(sm)
@@ -478,12 +480,12 @@ def Unified_catalog(tpf,magnitude_limit=18,offset=10):
 		print(no_targets_found_message)
 
 	radecs = np.vstack([result['RAJ2000'], result['DEJ2000']]).T
-	coords = tpf.wcs.all_world2pix(radecs, 0)
+	coords = wcs.all_world2pix(radecs, 0)
 	result['row'] = coords[:,1]
 	result['col'] = coords[:,0]
 	#Jmag = result['Jmag']
 	ind = (((coords[:,0] >= -offset) & (coords[:,1] >= -offset)) & 
-		   ((coords[:,0] < (tpf.shape[1] + offset)) & (coords[:,1] < (tpf.shape[2] + offset))))
+		   ((coords[:,0] < (shape[1] + offset)) & (coords[:,1] < (shape[2] + offset))))
 	result = result.iloc[ind]
 	
 	return result
