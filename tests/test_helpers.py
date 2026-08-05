@@ -22,6 +22,8 @@ from tessreduce.helpers import (
     smooth_zp,
     Smooth_bkg,
     regional_stats_mask,
+    _tess_pointing_table,
+    _target_sectors,
 )
 
 
@@ -314,6 +316,44 @@ class TestRegionalStatsMask(unittest.TestCase):
         mask = regional_stats_mask(image, size=15, sigma=3)
         self.assertTrue(mask[15, 15])
 
+
+class TestTessPointingTable(unittest.TestCase):
+
+    def test_indexed_by_sector_with_expected_columns(self):
+        table = _tess_pointing_table()
+        self.assertEqual(table.index.name, 'Sector')
+        self.assertIn('mjd_start', table.columns)
+        self.assertIn('mjd_end', table.columns)
+
+    def test_end_after_start(self):
+        table = _tess_pointing_table()
+        self.assertTrue((table['mjd_end'] > table['mjd_start']).all())
+
+    def test_known_sector_one_start_time(self):
+        # Sector 1 start is 2018-07-25 19:00 UT, JD 2458324.5 -> MJD 58324.0
+        table = _tess_pointing_table()
+        self.assertAlmostEqual(table.loc[1, 'mjd_start'], 58324.0, places=3)
+
+
+class TestTargetSectors(unittest.TestCase):
+
+    def test_known_target_returns_expected_sectors(self):
+        # Reference target cross-checked against tess_stars2px_function_entry
+        # (tess-point) output: sectors 2, 29, 69, 96, 103, 104, 105, 106.
+        outSecs, outCam, outCcd, outColPix, outRowPix = _target_sectors(10.127, -50.687)
+        expected = {2, 29, 69, 96, 103, 104, 105, 106}
+        self.assertTrue(expected.issubset(set(outSecs.tolist())))
+
+    def test_arrays_aligned_and_sorted(self):
+        outSecs, outCam, outCcd, outColPix, outRowPix = _target_sectors(10.127, -50.687)
+        lengths = {len(outSecs), len(outCam), len(outCcd), len(outColPix), len(outRowPix)}
+        self.assertEqual(len(lengths), 1)
+        assert_array_equal(outSecs, np.sort(outSecs))
+
+    def test_pixel_coordinates_within_ccd_bounds(self):
+        outSecs, outCam, outCcd, outColPix, outRowPix = _target_sectors(10.127, -50.687)
+        self.assertTrue(np.all((outColPix >= 0) & (outColPix <= 2136)))
+        self.assertTrue(np.all((outRowPix >= 0) & (outRowPix <= 2078)))
 
 if __name__ == '__main__':
     unittest.main()

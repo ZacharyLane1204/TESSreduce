@@ -38,7 +38,7 @@ import lightkurve as lk
 from photutils.detection import StarFinder
 
 from PRF import TESS_PRF
-from tess_stars2px import tess_stars2px_function_entry as focal_plane
+import tesswcs
 from tabulate import tabulate
 
 package_directory = os.path.dirname(os.path.abspath(__file__)) + '/'
@@ -520,6 +520,62 @@ def grad_flux_rad(flux):
 	return rad
 
 
+def _tess_pointing_table():
+	"""
+	Sector start/end times (MJD), sourced from tesswcs.pointings so the table
+	stays current with tesswcs releases rather than a file pinned in this repo.
+
+	Returns
+	-------
+	sec_times : pd.DataFrame
+		Indexed by Sector, with mjd_start and mjd_end columns.
+	"""
+	pointings = tesswcs.pointings.to_pandas()[['Sector','Start','End']]
+	pointings = pointings.rename(columns={'Start':'mjd_start','End':'mjd_end'})
+	pointings['mjd_start'] = Time(pointings['mjd_start'].values,format='jd').mjd
+	pointings['mjd_end'] = Time(pointings['mjd_end'].values,format='jd').mjd
+	return pointings.set_index('Sector').sort_index()
+
+
+def _target_sectors(ra,dec):
+	"""
+	Find which TESS sectors, cameras and CCDs observe a given coordinate.
+	Replaces tess_stars2px_function_entry (tess-point) with tesswcs, which
+	covers both archived and predicted sector pointings.
+
+	Returns
+	-------
+	outSecs, outCam, outCcd, outColPix, outRowPix : np.array
+		Sector number, camera, CCD, and pixel column/row for each match,
+		sorted by sector.
+	"""
+	import logging
+	coord = SkyCoord(ra,dec,unit='deg')
+
+	level = tesswcs.log.level
+	tesswcs.log.setLevel(logging.ERROR)
+	secs, cams, ccds, cols, rows = [], [], [], [], []
+	try:
+		for sector in tesswcs.pointings['Sector']:
+			sector = int(sector)
+			for camera in range(1,5):
+				for ccd in range(1,5):
+					try:
+						wcs = tesswcs.WCS.from_sector(sector,camera,ccd)
+					except ValueError:
+						continue
+					if wcs.footprint_contains(coord):
+						col, row = wcs.world_to_pixel(coord)
+						secs += [sector]; cams += [camera]; ccds += [ccd]
+						cols += [float(col)]; rows += [float(row)]
+	finally:
+		tesswcs.log.setLevel(level)
+
+	order = np.argsort(secs)
+	return (np.array(secs)[order], np.array(cams)[order], np.array(ccds)[order],
+			np.array(cols)[order], np.array(rows)[order])
+
+
 def sn_lookup(name,time='disc',buffer=0,print_table=True, df = False):
 	"""
 	Check for overlapping TESS ovservations for a transient. Uses the Open SNe Catalog for 
@@ -589,16 +645,15 @@ def sn_lookup(name,time='disc',buffer=0,print_table=True, df = False):
 	ra = c.ra.deg
 	dec = c.dec.deg
 	
-	outID, outEclipLong, outEclipLat, outSecs, outCam, outCcd, outColPix, \
-	outRowPix, scinfo = focal_plane(0, ra, dec)
-	
-	sec_times = pd.read_csv(package_directory + 'sector_mjd.csv')
+	outSecs, outCam, outCcd, outColPix, outRowPix = _target_sectors(ra, dec)
+
+	sec_times = _tess_pointing_table()
 	if len(outSecs) > 0:
-		ind = outSecs - 1 
+		keep = np.isin(outSecs, sec_times.index)
+		outSecs, outCam, outCcd, outColPix, outRowPix = \
+			outSecs[keep], outCam[keep], outCcd[keep], outColPix[keep], outRowPix[keep]
 
-		new_ind = [i for i in ind if i < len(sec_times)]
-
-		secs = sec_times.iloc[new_ind]
+		secs = sec_times.loc[outSecs].reset_index()
 		if type(time) == str:
 			if (time.lower() == 'disc') | (time.lower() == 'discovery'):
 				disc_start = secs['mjd_start'].values - disc_t.mjd
@@ -679,16 +734,15 @@ def spacetime_lookup(ra,dec,time=None,buffer=0,print_table=True, df = False, pri
 		ra = c.ra.deg
 		dec = c.dec.deg
 
-	outID, outEclipLong, outEclipLat, outSecs, outCam, outCcd, outColPix, \
-	outRowPix, scinfo = focal_plane(0, ra, dec)
-	
-	sec_times = pd.read_csv(package_directory + 'sector_mjd.csv')
+	outSecs, outCam, outCcd, outColPix, outRowPix = _target_sectors(ra, dec)
+
+	sec_times = _tess_pointing_table()
 	if len(outSecs) > 0:
-		ind = outSecs - 1 
+		keep = np.isin(outSecs, sec_times.index)
+		outSecs, outCam, outCcd, outColPix, outRowPix = \
+			outSecs[keep], outCam[keep], outCcd[keep], outColPix[keep], outRowPix[keep]
 
-		new_ind = [i for i in ind if i < len(sec_times)]
-
-		secs = sec_times.iloc[new_ind]
+		secs = sec_times.loc[outSecs].reset_index()
 		disc_start = secs['mjd_start'].values - time
 		disc_end = secs['mjd_end'].values - time
 
