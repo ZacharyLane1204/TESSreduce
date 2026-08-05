@@ -38,7 +38,7 @@ REQUIRED = ['lightkurve>=2.0.0',
             'sep',
             'tqdm',
             'alerce',
-            'tess-point',
+            'tesswcs',
             'tabulate',
             'TESS_PRF']
 

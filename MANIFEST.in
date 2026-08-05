@@ -2,4 +2,3 @@ include README.md LICENSE
 include tessreduce/tess_straps.csv
 include tessreduce/Tonry_splines.txt
 include tessreduce/SMspline.txt
-include tessreduce/sector_mjd.csv
