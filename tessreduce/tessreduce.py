@@ -290,11 +290,15 @@ class tessreduce():
 		self.ccd = ccd 
 		self.shift = shifts
 
-		# Calculated 
+		# Calculated
 		self.mask = None
 		#self._over_sub = None
 		self.bkg = None
 		# self.flux = None
+		self.flux_raw = None
+		self.quality = None
+		self.column = None
+		self.row = None
 		self.delta_kernel = None
 		self.ref = None
 		self.ref_ind = None
@@ -368,6 +372,16 @@ class tessreduce():
 			self.row = tpf.row
 			self.camera = self.tpf.camera
 			self.ccd = self.tpf.ccd
+			self.quality = self.tpf.quality
+			self.flux_raw = deepcopy(self.flux)
+
+			# All values needed downstream are now class attributes, so drop the
+			# tpf object rather than keep its flux cube duplicated in memory.
+			try:
+				self.tpf.hdu.close()
+			except Exception:
+				pass
+			self.tpf = None
 
 		# -- Allow for cube to be given directly, but require MJD, WCS, Sector to be given as well -- #
 		elif self.flux is not None:
@@ -395,7 +409,8 @@ class tessreduce():
 			self.eflux = None
 			self.column = 0
 			self.row = 0
-			self.rawflux = deepcopy(self.flux)
+			self.quality = np.zeros(len(self.flux),dtype=int)
+			self.flux_raw = deepcopy(self.flux)
 
 
 		# Retrieve TPF
@@ -586,6 +601,16 @@ class tessreduce():
 		self.row = tpf.row
 		self.camera = self.tpf.camera
 		self.ccd = self.tpf.ccd
+		self.quality = self.tpf.quality
+		self.flux_raw = deepcopy(self.flux)
+
+		# All values needed downstream are now class attributes, so drop the
+		# tpf object rather than keep its flux cube duplicated in memory.
+		try:
+			self.tpf.hdu.close()
+		except Exception:
+			pass
+		self.tpf = None
 
 
 	def make_mask(self,catalogue_path=None,maglim=19,scale=1,strapsize=6,useref=False):
@@ -628,7 +653,7 @@ class tessreduce():
 		if useref:
 			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
 		else:
-			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,ref=self.ref,col_offset=self._col_offset)
+			mask, cat = Cat_mask(self.ra,self.dec,self.flux.shape,self.wcs,self.flux,self.column,catalogue_path,maglim,scale,strapsize,col_offset=self._col_offset)
 
 		# Generate sky background as the inverse of mask
 		sky = ((mask & 1)+1 == 1) * 1.
@@ -1409,7 +1434,7 @@ class tessreduce():
 			start = int(start)
 			stop = int(stop)
 
-			ind = self.tpf.quality[start:stop] == 0
+			ind = self.quality[start:stop] == 0
 			d = deepcopy(data[start:stop])[ind]
 			summed = np.nanmedian(d,axis=(1,2))
 			summed[summed <=0] = 1e5
@@ -1508,7 +1533,7 @@ class tessreduce():
 		meds = np.nanmedian(shifts,axis = 2)
 		meds[~np.isfinite(meds)] = 0
 
-		smooth = Smooth_motion(meds,self.tpf)
+		smooth = Smooth_motion(meds,self.mjd,self.flux_raw)
 		nans = np.nansum(f,axis=(1,2)) ==0
 		smooth[nans] = np.nan
 		self.shift = meds #smooth
@@ -1579,7 +1604,7 @@ class tessreduce():
 				shifts[i,:] = difference_shifts(f[i],m)
 		sraw = deepcopy(shifts)
 		if smooth:
-			shifts = Smooth_motion(shifts,self.tpf)
+			shifts = Smooth_motion(shifts,self.mjd,self.flux_raw)
 
 		if self.shift is not None:
 			self.shift += shifts
@@ -2826,8 +2851,7 @@ class tessreduce():
 			_times['alignment'] = time.perf_counter() - _t
 			print('alignment done')
 
-			rawcube = self.rawflux if hasattr(self,'rawflux') else self.tpf.flux.value
-			_bad_frames = np.nansum(rawcube,axis=(1,2))==0
+			_bad_frames = np.nansum(self.flux_raw,axis=(1,2))==0
 
 			if not self.diff:
 				if self.align:
@@ -2846,8 +2870,7 @@ class tessreduce():
 				# reseting to do diffim
 				_t = time.perf_counter()
 
-				self.flux = rawcube
-				self.flux = self.flux / self.qe
+				self.flux = self.flux_raw / self.qe
 
 				if self.align:
 					self.shift_images()
@@ -2857,7 +2880,6 @@ class tessreduce():
 				self._flux_aligned = deepcopy(self.flux)
 				if test_seed is not None:
 					self.flux += test_seed
-				rawcube = self.rawflux if hasattr(self,'rawflux') else self.tpf.flux.value
 				self.flux[_bad_frames] = np.nan
 				# subtract reference
 				if self._ref_type.lower() == 'single':

@@ -384,18 +384,20 @@ def difference_shifts(image,ref):#,eimage,eref):
 		s = np.zeros((2)) * np.nan
 	return s
 
-def Smooth_motion(Centroids,tpf,skernel=25):
+def Smooth_motion(Centroids,mjd,flux,skernel=25):
 	"""
-	Calculate the smoothed centroid shift 
+	Calculate the smoothed centroid shift
 
 	Parameters
 	----------
 	Centroids : array
 		centroid shifts from all frames
 
+	mjd : array
+		time of each frame, used to find orbit gaps
 
-	TPF : lightkurve targetpixelfile
-		tpf
+	flux : array
+		flux cube, used to identify padded/empty frames
 
 	Returns
 	-------
@@ -411,11 +413,11 @@ def Smooth_motion(Centroids,tpf,skernel=25):
 	# 	skernel = 25
 	try:
 		try:
-			split = np.where(np.diff(tpf.time.mjd) > 0.5)[0][0] + 1
+			split = np.where(np.diff(mjd) > 0.5)[0][0] + 1
 			# ugly, but who cares
-			ind1 = np.nansum(tpf.flux[:split],axis=(1,2))
+			ind1 = np.nansum(flux[:split],axis=(1,2))
 			ind1 = np.where(ind1 != 0)[0]
-			ind2 = np.nansum(tpf.flux[split:],axis=(1,2))
+			ind2 = np.nansum(flux[split:],axis=(1,2))
 			ind2 = np.where(ind2 != 0)[0] + split
 			smoothed[ind1,0] = savgol_filter(Centroids[ind1,0],skernel,3)
 			smoothed[ind2,0] = savgol_filter(Centroids[ind2,0],skernel,3)
@@ -423,11 +425,11 @@ def Smooth_motion(Centroids,tpf,skernel=25):
 			smoothed[ind1,1] = savgol_filter(Centroids[ind1,1],skernel,3)
 			smoothed[ind2,1] = savgol_filter(Centroids[ind2,1],skernel,3)
 		except:
-			split = np.where(np.diff(tpf.time.mjd) > 0.5)[0][0] + 1
+			split = np.where(np.diff(mjd) > 0.5)[0][0] + 1
 			# ugly, but who cares
-			ind1 = np.nansum(tpf.flux[:split],axis=(1,2))
+			ind1 = np.nansum(flux[:split],axis=(1,2))
 			ind1 = np.where(ind1 != 0)[0]
-			ind2 = np.nansum(tpf.flux[split:],axis=(1,2))
+			ind2 = np.nansum(flux[split:],axis=(1,2))
 			ind2 = np.where(ind2 != 0)[0] + split
 			smoothed[ind1,0] = savgol_filter(Centroids[ind1,0],skernel//2+1,3)
 			smoothed[ind2,0] = savgol_filter(Centroids[ind2,0],skernel//2+1,3)
