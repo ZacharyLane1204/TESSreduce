@@ -296,7 +296,7 @@ def Strap_mask(Image, col, size=4, flux_cube=None):
     big_strap = fftconvolve(strap_mask, np.ones((size, size)), mode='same') > .5
     return big_strap
 
-def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigma=3,col_offset=0,flux_cube=None):
+def Cat_mask(ra,dec,shape,wcs,flux,column,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigma=3,col_offset=0,flux_cube=None):
 
 	"""
 	Make a source mask from the PS1 and Gaia catalogs.
@@ -330,14 +330,14 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 
 	if catalogue_path is not None:
 		gaia = external_load_cat(catalogue_path,maglim)
-		coords = tpf.wcs.all_world2pix(gaia['ra'],gaia['dec'], 0)
+		coords = wcs.all_world2pix(gaia['ra'],gaia['dec'], 0)
 		gaia['x'] = coords[0]
 		gaia['y'] = coords[1]
 	else:
-		gp,gm = Get_Gaia(tpf,magnitude_limit=maglim)
+		gp,gm = Get_Gaia(ra,dec,wcs,shape,magnitude_limit=maglim)
 		gaia = pd.DataFrame(np.array([gp[:,0],gp[:,1],gm]).T,columns=['x','y','mag'])
 
-	image = tpf.flux[10]
+	image = flux[10]
 	image = strip_units(image)
 
 	NY, NX = image.shape
@@ -360,7 +360,7 @@ def Cat_mask(tpf,catalogue_path=None,maglim=19,scale=1,strapsize=3,ref=None,sigm
 	sat = (np.nansum(sat,axis=0) > 0).astype(int) * 2 # assign 2 bit 
 	
 	if strapsize > 0:
-		strap = Strap_mask(image,tpf.column+col_offset,strapsize,flux_cube=flux_cube).astype(int) * 4 # assign 4 bit
+		strap = Strap_mask(image,column+col_offset,strapsize,flux_cube=flux_cube).astype(int) * 4 # assign 4 bit
 	else:
 		strap = np.zeros_like(image,dtype=int)
 
